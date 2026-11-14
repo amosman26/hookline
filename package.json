@@ -8,6 +8,8 @@
     "node": ">=22"
   },
   "scripts": {
+    "infra:up": "docker compose up -d --wait",
+    "infra:down": "docker compose down",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
