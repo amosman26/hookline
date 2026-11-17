@@ -15,6 +15,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    # Integration tests run against real Postgres, never a mock of it.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: hookline
+          POSTGRES_PASSWORD: hookline
+          POSTGRES_DB: hookline
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hookline -d hookline"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://hookline:hookline@localhost:5432/hookline
+
     steps:
       - uses: actions/checkout@v4
         with:

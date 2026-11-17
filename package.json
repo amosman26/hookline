@@ -15,7 +15,8 @@
     "format:check": "prettier --check .",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
-    "prepare": "husky"
+    "prepare": "husky",
+    "db:migrate": "pnpm --filter @hookline/db build && pnpm --filter @hookline/db db:migrate"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.4",
