@@ -13,8 +13,9 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "pnpm -r --if-present typecheck",
-    "test": "pnpm -r --if-present test",
+    "build:packages": "pnpm --filter \"./packages/*\" build",
+    "typecheck": "pnpm build:packages && pnpm -r --if-present typecheck",
+    "test": "pnpm build:packages && pnpm -r --if-present test",
     "prepare": "husky",
     "db:migrate": "pnpm --filter @hookline/db build && pnpm --filter @hookline/db db:migrate"
   },

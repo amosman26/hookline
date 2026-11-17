@@ -8,6 +8,8 @@ describe("GET /health", () => {
   let app: INestApplication;
 
   beforeAll(async () => {
+    // The pool connects lazily and /health never queries, so any URL will do.
+    process.env.DATABASE_URL ??= "postgres://localhost:5432/unused";
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication();
     await app.init();
