@@ -11,6 +11,14 @@ export const MAX_EVENT_TYPES = 50;
  */
 const EVENT_TYPE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 
+export const EVENT_TYPE_RULE =
+  "1-100 characters of letters, digits and ._:- starting with a letter or digit";
+
+/** True when `value` is a valid event type (shared by endpoints and events). */
+export function isEventType(value: unknown): value is string {
+  return typeof value === "string" && EVENT_TYPE_PATTERN.test(value);
+}
+
 export const ENDPOINT_SECRET_PREFIX = "whsec_";
 
 /** `whsec_` followed by 32 random bytes in base64url. */
@@ -100,12 +108,8 @@ function parseEventTypes(value: unknown, problems: string[]): string[] | undefin
     problems.push("eventTypes must be a non-empty array");
     return undefined;
   }
-  const bad = value.filter((t) => typeof t !== "string" || !EVENT_TYPE_PATTERN.test(t));
-  if (bad.length > 0) {
-    problems.push(
-      "eventTypes entries must be 1-100 characters of letters, digits and ._:- " +
-        "starting with a letter or digit",
-    );
+  if (!value.every(isEventType)) {
+    problems.push(`eventTypes entries must be ${EVENT_TYPE_RULE}`);
     return undefined;
   }
   // Order is irrelevant to matching, so store a stable, de-duplicated list.

@@ -4,6 +4,7 @@ import { Client } from "pg";
 import {
   apiKeys,
   createDb,
+  deliveries,
   endpoints,
   events,
   projects,
@@ -59,7 +60,13 @@ describeWithDb("migrations", () => {
       `SELECT table_name FROM information_schema.tables
        WHERE table_schema = 'public' ORDER BY table_name`,
     );
-    expect(rows.map((r) => r.table_name)).toEqual(["api_keys", "endpoints", "events", "projects"]);
+    expect(rows.map((r) => r.table_name)).toEqual([
+      "api_keys",
+      "deliveries",
+      "endpoints",
+      "events",
+      "projects",
+    ]);
   });
 
   it("is safe to run again", async () => {
@@ -99,6 +106,30 @@ describeWithDb("migrations", () => {
 
     const keyless = { projectId: a, type: "order.paid", payload: {} };
     await handle.db.insert(events).values([keyless, keyless]);
+  });
+
+  it("creates one pending delivery per event and endpoint", async () => {
+    const projectId = await newProject();
+    const [endpoint] = await handle.db
+      .insert(endpoints)
+      .values({ projectId, url: "https://example.com/hooks", secret: "whsec_test" })
+      .returning();
+    const [event] = await handle.db
+      .insert(events)
+      .values({ projectId, type: "order.paid", payload: {} })
+      .returning();
+    if (!endpoint || !event) throw new Error("insert returned no row");
+
+    const delivery = { projectId, eventId: event.id, endpointId: endpoint.id };
+    const [row] = await handle.db.insert(deliveries).values(delivery).returning();
+    expect(row).toMatchObject({ status: "pending", attemptCount: 0 });
+    await expect(handle.db.insert(deliveries).values(delivery)).rejects.toMatchObject({
+      cause: expect.objectContaining({ code: "23505" }),
+    });
+
+    await handle.db.delete(endpoints).where(eq(endpoints.id, endpoint.id));
+    const left = await handle.db.select().from(deliveries).where(eq(deliveries.eventId, event.id));
+    expect(left).toHaveLength(0);
   });
 
   it("deletes a project's rows with the project", async () => {

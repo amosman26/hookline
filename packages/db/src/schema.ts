@@ -2,7 +2,9 @@ import { sql } from "drizzle-orm";
 import {
   boolean,
   index,
+  integer,
   jsonb,
+  pgEnum,
   pgTable,
   text,
   timestamp,
@@ -94,7 +96,45 @@ export const events = pgTable(
   ],
 );
 
+/**
+ * Where one event stands with one endpoint. `pending` until it is delivered
+ * (`succeeded`), refused for good (`failed`) or out of retries (`dead`).
+ */
+export const deliveryStatus = pgEnum("delivery_status", ["pending", "succeeded", "failed", "dead"]);
+
+/**
+ * One row per (event, endpoint) pair, created when the event is accepted.
+ * Postgres is the source of truth for what still has to be delivered; the
+ * queue only says when to try. Deleting an endpoint deletes its deliveries.
+ */
+export const deliveries = pgTable(
+  "deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    eventId: uuid("event_id")
+      .notNull()
+      .references(() => events.id, { onDelete: "cascade" }),
+    endpointId: uuid("endpoint_id")
+      .notNull()
+      .references(() => endpoints.id, { onDelete: "cascade" }),
+    status: deliveryStatus("status").notNull().default("pending"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // An event is delivered to each endpoint once; this also serves lookups by event.
+    uniqueIndex("deliveries_event_id_endpoint_id_key").on(t.eventId, t.endpointId),
+    index("deliveries_endpoint_id_created_at_idx").on(t.endpointId, t.createdAt.desc()),
+  ],
+);
+
 export type Project = typeof projects.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;
 export type Endpoint = typeof endpoints.$inferSelect;
 export type Event = typeof events.$inferSelect;
+export type Delivery = typeof deliveries.$inferSelect;
+export type DeliveryStatus = (typeof deliveryStatus.enumValues)[number];
