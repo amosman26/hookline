@@ -1,0 +1,107 @@
+import {
+  deliveries,
+  deliveryAttempts,
+  endpoints,
+  events,
+  type Database,
+  type Endpoint,
+  type Event,
+} from "@hookline/db";
+import { sign } from "@hookline/signing";
+import { and, eq } from "drizzle-orm";
+import { send as defaultSend, type SendResult, type WebhookRequest } from "./send";
+
+export const USER_AGENT = "Hookline/0.1";
+
+/** What one run of a delivery job did. */
+export type DeliveryOutcome = "succeeded" | "failed" | "skipped";
+
+export interface DeliverOptions {
+  /** Swappable for tests; defaults to a real HTTP POST. */
+  send?: (request: WebhookRequest) => Promise<SendResult>;
+  /** Signing time in Unix seconds; defaults to now. */
+  now?: () => number;
+}
+
+/** The JSON body every endpoint receives. */
+export function webhookBody(event: Event): string {
+  return JSON.stringify({
+    id: event.id,
+    type: event.type,
+    createdAt: event.createdAt.toISOString(),
+    data: event.payload,
+  });
+}
+
+/**
+ * The signed request for one event and endpoint. Hookline-Id is the event id,
+ * so it stays the same on every attempt and receivers can use it to drop
+ * duplicates (delivery is at-least-once).
+ */
+export function webhookRequest(
+  event: Event,
+  endpoint: Endpoint,
+  timestamp?: number,
+): WebhookRequest {
+  const body = webhookBody(event);
+  const signed = sign({ id: event.id, body, secret: endpoint.secret, timestamp });
+  return {
+    url: endpoint.url,
+    headers: { "content-type": "application/json", "user-agent": USER_AGENT, ...signed },
+    body,
+  };
+}
+
+/**
+ * Makes one attempt at a delivery and records it. Safe to run twice for the
+ * same delivery: anything no longer `pending` is skipped, and the attempt is
+ * only recorded if the delivery is still where it was when we read it.
+ *
+ * Retries come later (H15/H16). For now any 2xx is `succeeded` and anything
+ * else, including no response, is `failed`.
+ */
+export async function deliver(
+  db: Database,
+  deliveryId: string,
+  options: DeliverOptions = {},
+): Promise<DeliveryOutcome> {
+  const [row] = await db
+    .select({ delivery: deliveries, event: events, endpoint: endpoints })
+    .from(deliveries)
+    .innerJoin(events, eq(events.id, deliveries.eventId))
+    .innerJoin(endpoints, eq(endpoints.id, deliveries.endpointId))
+    .where(eq(deliveries.id, deliveryId));
+
+  // Deleted with its endpoint or project, or already finished.
+  if (!row || row.delivery.status !== "pending") return "skipped";
+
+  const result: SendResult = row.endpoint.enabled
+    ? await (options.send ?? defaultSend)(webhookRequest(row.event, row.endpoint, options.now?.()))
+    : { statusCode: null, durationMs: 0, responseBody: null, error: "endpoint is disabled" };
+
+  const ok = result.statusCode !== null && result.statusCode >= 200 && result.statusCode < 300;
+  const status = ok ? "succeeded" : "failed";
+  const attemptNumber = row.delivery.attemptCount + 1;
+
+  const recorded = await db.transaction(async (tx) => {
+    // Compare-and-set on attempt_count: if another run got here first, its
+    // result stands and this one is dropped.
+    const updated = await tx
+      .update(deliveries)
+      .set({ status, attemptCount: attemptNumber, updatedAt: new Date() })
+      .where(
+        and(
+          eq(deliveries.id, deliveryId),
+          eq(deliveries.status, "pending"),
+          eq(deliveries.attemptCount, row.delivery.attemptCount),
+        ),
+      )
+      .returning({ id: deliveries.id });
+    if (updated.length === 0) return false;
+
+    await tx.insert(deliveryAttempts).values({ deliveryId, attemptNumber, ...result });
+    return true;
+  });
+
+  return recorded ? status : "skipped";
+}

@@ -2,11 +2,14 @@ import "reflect-metadata";
 import { INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import { apiKeys, deliveries, events, projects } from "@hookline/db";
+import { DELIVERY_QUEUE, type DeliveryJobData } from "@hookline/queue";
+import { Queue } from "bullmq";
 import { eq } from "drizzle-orm";
 import request from "supertest";
 import { AppModule } from "../src/app.module";
 import { generateApiKey } from "../src/auth/api-key";
 import { createTestDatabase, describeWithDb, type TestDatabase } from "./support/test-database";
+import { itWithRedis, redisUrl } from "./support/test-redis";
 
 describeWithDb("events API", () => {
   let testDb: TestDatabase;
@@ -96,6 +99,27 @@ describeWithDb("events API", () => {
         status: "pending",
         attemptCount: 0,
       });
+    }
+  });
+
+  itWithRedis("queues one job per delivery, keyed by the delivery id", async () => {
+    await createEndpoint(["refund.issued"]);
+    await createEndpoint(["refund.issued"]);
+    const res = await post("/v1/events")
+      .send({ type: "refund.issued", payload: { id: "re_1" } })
+      .expect(202);
+    const ids = (res.body.deliveries as { id: string }[]).map((d) => d.id);
+    expect(ids).toHaveLength(2);
+
+    const queue = new Queue<DeliveryJobData>(DELIVERY_QUEUE, { connection: { url: redisUrl } });
+    try {
+      for (const id of ids) {
+        const job = await queue.getJob(id);
+        expect(job?.data).toEqual({ deliveryId: id });
+        await job?.remove();
+      }
+    } finally {
+      await queue.close();
     }
   });
 

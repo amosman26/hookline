@@ -5,9 +5,10 @@ import { EndpointsModule } from "./endpoints/endpoints.module";
 import { EventsModule } from "./events/events.module";
 import { HealthController } from "./health/health.controller";
 import { ProjectsController } from "./projects/projects.controller";
+import { QueueModule } from "./queue/queue.module";
 
 @Module({
-  imports: [DatabaseModule, AuthModule, EndpointsModule, EventsModule],
+  imports: [DatabaseModule, QueueModule, AuthModule, EndpointsModule, EventsModule],
   controllers: [HealthController, ProjectsController],
 })
 export class AppModule {}

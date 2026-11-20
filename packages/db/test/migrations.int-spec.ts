@@ -5,6 +5,7 @@ import {
   apiKeys,
   createDb,
   deliveries,
+  deliveryAttempts,
   endpoints,
   events,
   projects,
@@ -63,6 +64,7 @@ describeWithDb("migrations", () => {
     expect(rows.map((r) => r.table_name)).toEqual([
       "api_keys",
       "deliveries",
+      "delivery_attempts",
       "endpoints",
       "events",
       "projects",
@@ -130,6 +132,34 @@ describeWithDb("migrations", () => {
     await handle.db.delete(endpoints).where(eq(endpoints.id, endpoint.id));
     const left = await handle.db.select().from(deliveries).where(eq(deliveries.eventId, event.id));
     expect(left).toHaveLength(0);
+  });
+
+  it("numbers attempts uniquely per delivery and deletes them with it", async () => {
+    const projectId = await newProject();
+    const [endpoint] = await handle.db
+      .insert(endpoints)
+      .values({ projectId, url: "https://example.com/hooks", secret: "whsec_test" })
+      .returning();
+    const [event] = await handle.db
+      .insert(events)
+      .values({ projectId, type: "order.paid", payload: {} })
+      .returning();
+    if (!endpoint || !event) throw new Error("insert returned no row");
+    const [delivery] = await handle.db
+      .insert(deliveries)
+      .values({ projectId, eventId: event.id, endpointId: endpoint.id })
+      .returning();
+    if (!delivery) throw new Error("insert returned no row");
+
+    const attempt = { deliveryId: delivery.id, attemptNumber: 1, durationMs: 12 };
+    const [row] = await handle.db.insert(deliveryAttempts).values(attempt).returning();
+    expect(row).toMatchObject({ statusCode: null, responseBody: null, error: null });
+    await expect(handle.db.insert(deliveryAttempts).values(attempt)).rejects.toMatchObject({
+      cause: expect.objectContaining({ code: "23505" }),
+    });
+
+    await handle.db.delete(deliveries).where(eq(deliveries.id, delivery.id));
+    expect(await handle.db.$count(deliveryAttempts)).toBe(0);
   });
 
   it("deletes a project's rows with the project", async () => {

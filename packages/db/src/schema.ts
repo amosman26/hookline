@@ -132,9 +132,40 @@ export const deliveries = pgTable(
   ],
 );
 
+/**
+ * One HTTP request made for a delivery. Kept even when it succeeds, so the
+ * full history of a delivery can be shown. `statusCode` is null when no
+ * response arrived (network error, timeout); `error` says why. The response
+ * body is truncated to 4 KB before it is stored.
+ */
+export const deliveryAttempts = pgTable(
+  "delivery_attempts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    deliveryId: uuid("delivery_id")
+      .notNull()
+      .references(() => deliveries.id, { onDelete: "cascade" }),
+    attemptNumber: integer("attempt_number").notNull(),
+    statusCode: integer("status_code"),
+    durationMs: integer("duration_ms").notNull(),
+    responseBody: text("response_body"),
+    error: text("error"),
+    attemptedAt: timestamp("attempted_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Attempts are numbered per delivery; the worker relies on this to never
+    // record the same attempt twice.
+    uniqueIndex("delivery_attempts_delivery_id_attempt_number_key").on(
+      t.deliveryId,
+      t.attemptNumber,
+    ),
+  ],
+);
+
 export type Project = typeof projects.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;
 export type Endpoint = typeof endpoints.$inferSelect;
 export type Event = typeof events.$inferSelect;
 export type Delivery = typeof deliveries.$inferSelect;
+export type DeliveryAttempt = typeof deliveryAttempts.$inferSelect;
 export type DeliveryStatus = (typeof deliveryStatus.enumValues)[number];

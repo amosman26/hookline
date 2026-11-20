@@ -15,6 +15,13 @@
       "when": 1795112125385,
       "tag": "0001_deliveries",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795198551418,
+      "tag": "0002_delivery_attempts",
+      "breakpoints": true
     }
   ]
 }

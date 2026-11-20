@@ -2,6 +2,7 @@ import { Inject, Injectable } from "@nestjs/common";
 import { deliveries, endpoints, events, type Delivery, type Event } from "@hookline/db";
 import { and, arrayContains, asc, eq } from "drizzle-orm";
 import { DB, type Database } from "../database/database.module";
+import { DeliveryQueue } from "../queue/delivery-queue";
 import type { CreateEventInput } from "./event-input";
 
 export interface AcceptedEvent {
@@ -11,15 +12,27 @@ export interface AcceptedEvent {
 
 @Injectable()
 export class EventsService {
-  constructor(@Inject(DB) private readonly db: Database) {}
+  constructor(
+    @Inject(DB) private readonly db: Database,
+    private readonly queue: DeliveryQueue,
+  ) {}
 
   /**
    * Stores the event and one pending delivery per enabled endpoint of the
    * project that subscribes to its type, in a single transaction: once the
    * caller gets a 202, every delivery owed for the event exists. Endpoints
    * created or enabled later do not receive events accepted before them.
+   *
+   * Jobs are enqueued only after the transaction commits, so the worker never
+   * picks up a delivery it cannot see yet.
    */
-  accept(projectId: string, input: CreateEventInput): Promise<AcceptedEvent> {
+  async accept(projectId: string, input: CreateEventInput): Promise<AcceptedEvent> {
+    const accepted = await this.store(projectId, input);
+    await this.queue.enqueue(accepted.deliveries.map((d) => d.id));
+    return accepted;
+  }
+
+  private store(projectId: string, input: CreateEventInput): Promise<AcceptedEvent> {
     return this.db.transaction(async (tx) => {
       const [event] = await tx
         .insert(events)

@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
-    # Integration tests run against real Postgres, never a mock of it.
+    # Integration tests run against real Postgres and Redis, never mocks of them.
     services:
       postgres:
         image: postgres:16
@@ -30,9 +30,19 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
 
     env:
       DATABASE_URL: postgres://hookline:hookline@localhost:5432/hookline
+      REDIS_URL: redis://localhost:6379
 
     steps:
       - uses: actions/checkout@v4
