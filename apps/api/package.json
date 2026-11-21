@@ -22,6 +22,8 @@
     "rxjs": "^7.8.2"
   },
   "devDependencies": {
+    "@hookline/signing": "workspace:*",
+    "@hookline/worker": "workspace:*",
     "@nestjs/testing": "^11.2.10",
     "@types/express": "^5.0.6",
     "@types/jest": "^30.0.0",

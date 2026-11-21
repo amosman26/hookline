@@ -3,6 +3,7 @@ import {
   DELIVER_JOB,
   DELIVERY_QUEUE,
   deliveryJobOptions,
+  queuePrefix,
   type DeliveryJobData,
 } from "@hookline/queue";
 import { Queue } from "bullmq";
@@ -27,7 +28,11 @@ export class DeliveryQueue implements OnApplicationShutdown {
       if (!url) throw new Error("REDIS_URL is not set");
       // The default per-request retry limit (unlike the worker's `null`) makes
       // commands fail instead of waiting forever while Redis is down.
-      this.queue = new Queue<DeliveryJobData>(DELIVERY_QUEUE, { connection: { url } });
+      const prefix = queuePrefix();
+      this.queue = new Queue<DeliveryJobData>(DELIVERY_QUEUE, {
+        connection: { url },
+        ...(prefix ? { prefix } : {}),
+      });
       this.queue.on("error", (error) => this.logger.warn(`Redis: ${error.message}`));
     }
     return this.queue;

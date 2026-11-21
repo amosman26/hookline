@@ -1,5 +1,10 @@
 import { createDb } from "@hookline/db";
-import { DELIVERY_QUEUE, redisConnection, type DeliveryJobData } from "@hookline/queue";
+import {
+  DELIVERY_QUEUE,
+  queuePrefix,
+  redisConnection,
+  type DeliveryJobData,
+} from "@hookline/queue";
 import { Queue } from "bullmq";
 import { enqueuePending } from "./sweep";
 import { createDeliveryWorker } from "./worker";
@@ -24,8 +29,13 @@ async function main(): Promise<void> {
   const connection = redisConnection(required("REDIS_URL"));
   const concurrency = concurrencyFromEnv();
 
-  const queue = new Queue<DeliveryJobData>(DELIVERY_QUEUE, { connection });
-  const worker = createDeliveryWorker({ db, connection, concurrency });
+  const prefix = queuePrefix();
+
+  const queue = new Queue<DeliveryJobData>(DELIVERY_QUEUE, {
+    connection,
+    ...(prefix ? { prefix } : {}),
+  });
+  const worker = createDeliveryWorker({ db, connection, concurrency, prefix });
 
   worker.on("completed", (job, outcome) => {
     console.log(`delivery ${job.data.deliveryId}: ${outcome}`);

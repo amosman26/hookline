@@ -1,0 +1,178 @@
+import "reflect-metadata";
+import { randomUUID } from "node:crypto";
+import { INestApplication } from "@nestjs/common";
+import { Test } from "@nestjs/testing";
+import { apiKeys, deliveries, deliveryAttempts, projects } from "@hookline/db";
+import { redisConnection } from "@hookline/queue";
+import { verify } from "@hookline/signing";
+import { createDeliveryWorker } from "@hookline/worker";
+import { eq } from "drizzle-orm";
+import request from "supertest";
+import { AppModule } from "../src/app.module";
+import { generateApiKey } from "../src/auth/api-key";
+import { Receiver } from "./support/receiver";
+import { createTestDatabase, type TestDatabase } from "./support/test-database";
+import { redisUrl } from "./support/test-redis";
+
+const describeWithServices = process.env.DATABASE_URL && redisUrl ? describe : describe.skip;
+
+// The whole path a customer relies on: POST /v1/events on the real API, a
+// real BullMQ queue in Redis, the real worker, and an HTTP receiver that
+// checks the signature the way a customer would. Only the receiver is ours.
+describeWithServices("event delivery, end to end", () => {
+  // Jest runs suites in parallel against one Redis. A prefix of our own keeps
+  // this suite's worker away from jobs other suites inspect, and vice versa.
+  const prefix = `hookline-test-${randomUUID()}`;
+  const receiver = new Receiver();
+  const originalEnv = { ...process.env };
+  let testDb: TestDatabase;
+  let app: INestApplication;
+  let worker: ReturnType<typeof createDeliveryWorker>;
+  let key: string;
+
+  beforeAll(async () => {
+    testDb = await createTestDatabase();
+    process.env.DATABASE_URL = testDb.url;
+    process.env.QUEUE_PREFIX = prefix;
+    await receiver.start();
+
+    const [project] = await testDb.db.insert(projects).values({ name: "Acme" }).returning();
+    if (!project) throw new Error("insert returned no row");
+    const generated = generateApiKey();
+    await testDb.db.insert(apiKeys).values({
+      projectId: project.id,
+      name: "test",
+      prefix: generated.prefix,
+      keyHash: generated.hash,
+    });
+    key = generated.key;
+
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    app = moduleRef.createNestApplication();
+    await app.init();
+
+    worker = createDeliveryWorker({
+      db: testDb.db,
+      connection: redisConnection(redisUrl as string),
+      prefix,
+    });
+    await worker.waitUntilReady();
+  });
+
+  afterAll(async () => {
+    await worker?.close();
+    await app?.close();
+    await receiver.stop();
+    // Assigning undefined to process.env stores the string "undefined".
+    process.env = originalEnv;
+    await testDb?.drop();
+  });
+
+  beforeEach(() => {
+    receiver.received.length = 0;
+    receiver.respond = () => ({ status: 200, body: "ok" });
+  });
+
+  const post = (path: string) =>
+    request(app.getHttpServer()).post(path).set("Authorization", `Bearer ${key}`);
+
+  async function createEndpoint(eventTypes: string[]): Promise<{ id: string; secret: string }> {
+    const res = await post("/v1/endpoints").send({ url: receiver.url, eventTypes }).expect(201);
+    return res.body as { id: string; secret: string };
+  }
+
+  async function settled(deliveryId: string, timeoutMs = 10_000) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const [row] = await testDb.db.select().from(deliveries).where(eq(deliveries.id, deliveryId));
+      if (row && row.status !== "pending") return row;
+      if (Date.now() > deadline) throw new Error(`delivery ${deliveryId} still pending`);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  const attemptsOf = (deliveryId: string) =>
+    testDb.db.select().from(deliveryAttempts).where(eq(deliveryAttempts.deliveryId, deliveryId));
+
+  it("delivers an accepted event to the endpoint with a valid signature", async () => {
+    const endpoint = await createEndpoint(["invoice.paid"]);
+    const payload = { id: "inv_42", amount: 1200, currency: "AED" };
+
+    const res = await post("/v1/events").send({ type: "invoice.paid", payload }).expect(202);
+    const event = res.body as { id: string; createdAt: string; deliveries: { id: string }[] };
+    expect(event.deliveries).toHaveLength(1);
+    const deliveryId = event.deliveries[0]?.id as string;
+
+    expect(await settled(deliveryId)).toMatchObject({ status: "succeeded", attemptCount: 1 });
+
+    expect(receiver.received).toHaveLength(1);
+    const [received] = receiver.received;
+    if (!received) throw new Error("nothing received");
+    expect(JSON.parse(received.body)).toEqual({
+      id: event.id,
+      type: "invoice.paid",
+      createdAt: event.createdAt,
+      data: payload,
+    });
+    expect(received.headers["content-type"]).toBe("application/json");
+    expect(received.headers["hookline-id"]).toBe(event.id);
+
+    // Check it exactly as a customer would: raw body, headers, their secret.
+    const header = (name: string) => received.headers[name] as string | undefined;
+    const valid = (secret: string) =>
+      verify({
+        id: header("hookline-id"),
+        timestamp: header("hookline-timestamp"),
+        signature: header("hookline-signature"),
+        body: received.body,
+        secret,
+      });
+    expect(valid(endpoint.secret)).toBe(true);
+    expect(valid(`${endpoint.secret}x`)).toBe(false);
+
+    expect(await attemptsOf(deliveryId)).toEqual([
+      expect.objectContaining({
+        attemptNumber: 1,
+        statusCode: 200,
+        responseBody: "ok",
+        error: null,
+      }),
+    ]);
+  });
+
+  it("records a failed attempt when the endpoint answers with an error", async () => {
+    await createEndpoint(["payout.failed"]);
+    receiver.respond = () => ({ status: 503, body: "maintenance" });
+
+    const res = await post("/v1/events")
+      .send({ type: "payout.failed", payload: { id: "po_7" } })
+      .expect(202);
+    const deliveryId = (res.body as { deliveries: { id: string }[] }).deliveries[0]?.id as string;
+
+    expect(await settled(deliveryId)).toMatchObject({ status: "failed", attemptCount: 1 });
+    expect(receiver.received).toHaveLength(1);
+    expect(await attemptsOf(deliveryId)).toEqual([
+      expect.objectContaining({ attemptNumber: 1, statusCode: 503, responseBody: "maintenance" }),
+    ]);
+  });
+
+  it("fans one event out to every subscribed endpoint and delivers each once", async () => {
+    await createEndpoint(["user.created"]);
+    await createEndpoint(["user.created", "user.deleted"]);
+    await createEndpoint(["user.deleted"]);
+
+    const res = await post("/v1/events")
+      .send({ type: "user.created", payload: { id: "usr_1" } })
+      .expect(202);
+    const ids = (res.body as { deliveries: { id: string }[] }).deliveries.map((d) => d.id);
+    expect(ids).toHaveLength(2);
+
+    for (const id of ids) {
+      expect(await settled(id)).toMatchObject({ status: "succeeded", attemptCount: 1 });
+    }
+    expect(receiver.received).toHaveLength(2);
+    expect(new Set(receiver.received.map((r) => r.headers["hookline-id"]))).toEqual(
+      new Set([res.body.id]),
+    );
+  });
+});

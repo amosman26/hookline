@@ -1,4 +1,4 @@
-import { deliveryJobOptions, redisConnection } from "./index";
+import { deliveryJobOptions, queuePrefix, redisConnection } from "./index";
 
 describe("deliveryJobOptions", () => {
   it("uses the delivery id as the job id so re-enqueueing is a no-op", () => {
@@ -18,5 +18,16 @@ describe("redisConnection", () => {
       url: "redis://localhost:6379",
       maxRetriesPerRequest: null,
     });
+  });
+});
+
+describe("queuePrefix", () => {
+  it("reads QUEUE_PREFIX", () => {
+    expect(queuePrefix({ QUEUE_PREFIX: "staging" })).toBe("staging");
+  });
+
+  it("falls back to the BullMQ default when unset or blank", () => {
+    expect(queuePrefix({})).toBeUndefined();
+    expect(queuePrefix({ QUEUE_PREFIX: "  " })).toBeUndefined();
   });
 });

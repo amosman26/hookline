@@ -33,3 +33,14 @@ export function deliveryJobOptions(deliveryId: string): JobsOptions {
 export function redisConnection(url: string): RedisOptions {
   return { url, maxRetriesPerRequest: null };
 }
+
+/**
+ * BullMQ key prefix from `QUEUE_PREFIX`, or undefined for BullMQ's default.
+ * The API and the worker must agree on it. Set it to run several
+ * environments (or parallel test suites) against one Redis without them
+ * taking each other's jobs.
+ */
+export function queuePrefix(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const value = env.QUEUE_PREFIX?.trim();
+  return value ? value : undefined;
+}
