@@ -13,6 +13,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "build": "pnpm -r --if-present build",
+    "start": "pnpm --parallel --filter @hookline/api --filter @hookline/worker start",
     "build:packages": "pnpm --filter \"./packages/*\" --filter @hookline/worker build",
     "typecheck": "pnpm build:packages && pnpm -r --if-present typecheck",
     "test": "pnpm build:packages && pnpm -r --if-present test",

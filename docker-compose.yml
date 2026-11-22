@@ -1,5 +1,5 @@
 # Local infrastructure for development and integration tests.
-# The API and worker run on the host with `pnpm dev`; only stateful services live here.
+# The API and worker run on the host with `pnpm start`; only stateful services live here.
 name: hookline
 
 services:
