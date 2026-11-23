@@ -1,6 +1,6 @@
 {
   "name": "@hookline/queue",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "The delivery queue contract shared by the Hookline API and worker.",
   "main": "dist/index.js",

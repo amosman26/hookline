@@ -1,6 +1,6 @@
 {
   "name": "@hookline/signing",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Sign and verify Hookline webhook payloads with HMAC-SHA256. No runtime dependencies.",
   "license": "MIT",
