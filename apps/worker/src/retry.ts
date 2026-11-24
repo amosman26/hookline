@@ -4,8 +4,8 @@ export const MAX_ATTEMPTS = 12;
 /** The longest wait between two attempts, whatever an endpoint asks for. */
 export const MAX_RETRY_DELAY_MS = 6 * 60 * 60 * 1000;
 
-/** Wait before the next attempt. A fixed delay for now; backoff comes next. */
-export const RETRY_DELAY_MS = 5_000;
+/** Backoff ceiling after the first failed attempt; it doubles after each one. */
+export const RETRY_BASE_DELAY_MS = 5_000;
 
 /** What one attempt's result means for the delivery. */
 export type AttemptVerdict = "success" | "retry" | "permanent";
@@ -41,6 +41,20 @@ export function parseRetryAfter(value: string | null, nowMs: number): number | n
   if (!/[A-Za-z]/.test(trimmed)) return null;
   const at = Date.parse(trimmed);
   return Number.isNaN(at) ? null : Math.max(0, at - nowMs);
+}
+
+/**
+ * Exponential backoff with full jitter: after failed attempt n (1-based) the
+ * wait is a random time between 0 and min(MAX_RETRY_DELAY_MS, base * 2^(n-1)).
+ * The ceiling grows so a struggling endpoint gets room to recover; the jitter
+ * spreads retries out so endpoints that failed together (an outage, a deploy)
+ * are not all hit again at the same moment when they come back.
+ *
+ * `random` returns a number in [0, 1), like Math.random; tests pass their own.
+ */
+export function backoffDelay(attemptNumber: number, random: () => number = Math.random): number {
+  const ceiling = Math.min(MAX_RETRY_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** (attemptNumber - 1));
+  return Math.floor(random() * ceiling);
 }
 
 /**

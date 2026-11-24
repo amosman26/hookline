@@ -2,7 +2,7 @@ import { deliveries, deliveryAttempts, endpoints, events, projects } from "@hook
 import { verify } from "@hookline/signing";
 import { asc, eq } from "drizzle-orm";
 import { deliver, USER_AGENT } from "../src/deliver";
-import { MAX_ATTEMPTS, RETRY_DELAY_MS } from "../src/retry";
+import { MAX_ATTEMPTS, RETRY_BASE_DELAY_MS } from "../src/retry";
 import { RESPONSE_BODY_LIMIT } from "../src/send";
 import { Receiver } from "./support/receiver";
 import { createTestDatabase, describeWithDb, type TestDatabase } from "./support/test-database";
@@ -116,10 +116,13 @@ describeWithDb("deliver", () => {
     const { delivery } = await pendingDelivery();
     receiver.respond = () => ({ status: 500, body: "x".repeat(RESPONSE_BODY_LIMIT + 100) });
 
-    await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({
-      outcome: "retrying",
-      retryInMs: RETRY_DELAY_MS,
-    });
+    const result = await deliver(testDb.db, delivery.id);
+
+    // First retry: full jitter below the base delay.
+    expect(result.outcome).toBe("retrying");
+    const retryInMs = result.outcome === "retrying" ? result.retryInMs : -1;
+    expect(retryInMs).toBeGreaterThanOrEqual(0);
+    expect(retryInMs).toBeLessThan(RETRY_BASE_DELAY_MS);
 
     const { delivery: after, attempts } = await state(delivery.id);
     expect(after).toMatchObject({ status: "pending", attemptCount: 1 });

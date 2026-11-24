@@ -10,11 +10,11 @@ import {
 import { sign } from "@hookline/signing";
 import { and, eq } from "drizzle-orm";
 import {
+  backoffDelay,
   classifyAttempt,
   MAX_ATTEMPTS,
   nextRetryDelay,
   parseRetryAfter,
-  RETRY_DELAY_MS,
   type AttemptVerdict,
 } from "./retry";
 import { send as defaultSend, type SendResult, type WebhookRequest } from "./send";
@@ -37,8 +37,9 @@ export interface DeliverOptions {
   /** Signing time in Unix seconds; defaults to now. */
   now?: () => number;
   /**
-   * Wait in milliseconds after the given failed attempt (1-based). Tests use
-   * a short one; Retry-After can still lengthen it.
+   * Wait in milliseconds after the given failed attempt (1-based). Defaults
+   * to exponential backoff with full jitter (backoffDelay); tests use a short
+   * fixed one. Retry-After can still lengthen it.
    */
   retryDelay?: (attemptNumber: number) => number;
 }
@@ -144,7 +145,7 @@ export async function deliver(
   if (!recorded) return { outcome: "skipped" };
   if (status !== "pending") return { outcome: status };
 
-  const policyDelay = (options.retryDelay ?? (() => RETRY_DELAY_MS))(attemptNumber);
+  const policyDelay = (options.retryDelay ?? backoffDelay)(attemptNumber);
   const retryAfter = parseRetryAfter(result.retryAfter, Date.now());
   return { outcome: "retrying", retryInMs: nextRetryDelay(policyDelay, retryAfter) };
 }
