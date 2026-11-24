@@ -40,6 +40,7 @@ describe("send", () => {
       durationMs: expect.any(Number),
       responseBody: "thanks",
       error: null,
+      retryAfter: null,
     });
   });
 
@@ -50,6 +51,11 @@ describe("send", () => {
       responseBody: "busy",
       error: null,
     });
+  });
+
+  it("passes on a Retry-After header", async () => {
+    handler = (_req, res) => res.writeHead(429, { "retry-after": "30" }).end();
+    expect(await send({ url, ...request })).toMatchObject({ statusCode: 429, retryAfter: "30" });
   });
 
   it("keeps only the first 4 KB of the response body", async () => {
@@ -81,6 +87,7 @@ describe("send", () => {
       durationMs: expect.any(Number),
       responseBody: null,
       error: "timed out after 200 ms",
+      retryAfter: null,
     });
     expect(result.durationMs).toBeGreaterThanOrEqual(190);
   });

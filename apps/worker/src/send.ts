@@ -19,6 +19,8 @@ export interface SendResult {
   responseBody: string | null;
   /** Why no response arrived, or null when one did. */
   error: string | null;
+  /** The response's Retry-After header as sent, or null without one. */
+  retryAfter: string | null;
 }
 
 export interface SendOptions {
@@ -50,13 +52,20 @@ export async function send(
       signal,
     });
     const responseBody = await readCapped(response, RESPONSE_BODY_LIMIT);
-    return { statusCode: response.status, durationMs: elapsed(), responseBody, error: null };
+    return {
+      statusCode: response.status,
+      durationMs: elapsed(),
+      responseBody,
+      error: null,
+      retryAfter: response.headers.get("retry-after"),
+    };
   } catch (error) {
     return {
       statusCode: null,
       durationMs: elapsed(),
       responseBody: null,
       error: signal.aborted ? `timed out after ${timeoutMs} ms` : describeError(error),
+      retryAfter: null,
     };
   }
 }

@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { deliveries, deliveryAttempts, endpoints, events, projects } from "@hookline/db";
-import { DELIVERY_QUEUE, redisConnection, type DeliveryJobData } from "@hookline/queue";
+import {
+  DELIVER_JOB,
+  DELIVERY_QUEUE,
+  deliveryJobOptions,
+  redisConnection,
+  type DeliveryJobData,
+} from "@hookline/queue";
 import { Queue, type Worker } from "bullmq";
 import { eq, inArray } from "drizzle-orm";
 import type { DeliveryOutcome } from "../src/deliver";
@@ -25,7 +31,13 @@ describeWithServices("delivery worker", () => {
     await receiver.start();
     const connection = redisConnection(redisUrl as string);
     queue = new Queue<DeliveryJobData>(DELIVERY_QUEUE, { connection, prefix });
-    worker = createDeliveryWorker({ db: testDb.db, connection, prefix, concurrency: 4 });
+    worker = createDeliveryWorker({
+      db: testDb.db,
+      connection,
+      prefix,
+      concurrency: 4,
+      retryDelay: () => 1_000,
+    });
     await worker.waitUntilReady();
   });
 
@@ -70,6 +82,11 @@ describeWithServices("delivery worker", () => {
     }
   }
 
+  beforeEach(() => {
+    receiver.received.length = 0;
+    receiver.respond = () => ({ status: 200, body: "ok" });
+  });
+
   it("sweeps pending deliveries into the queue and delivers each one once", async () => {
     const ids = await pendingDeliveries(5);
 
@@ -96,5 +113,40 @@ describeWithServices("delivery worker", () => {
         .where(eq(deliveryAttempts.deliveryId, id));
       expect(attempts).toEqual([expect.objectContaining({ attemptNumber: 1, statusCode: 200 })]);
     }
+  });
+
+  it("delays the same job after a retryable failure and delivers on the next try", async () => {
+    const [id] = await pendingDeliveries(1);
+    let calls = 0;
+    receiver.respond = () => {
+      calls += 1;
+      return calls === 1 ? { status: 503, body: "busy" } : { status: 200, body: "ok" };
+    };
+
+    await queue.add(DELIVER_JOB, { deliveryId: id as string }, deliveryJobOptions(id as string));
+
+    // While it waits, the job keeps its id, so queueing it again is a no-op.
+    await waitFor(async () => (await queue.getDelayedCount()) === 1);
+    await enqueuePending(testDb.db, queue);
+    expect(await queue.getDelayedCount()).toBe(1);
+    expect(await queue.getWaitingCount()).toBe(0);
+
+    await waitFor(async () => {
+      const [row] = await testDb.db
+        .select({ status: deliveries.status })
+        .from(deliveries)
+        .where(eq(deliveries.id, id as string));
+      return row?.status === "succeeded";
+    });
+    const attempts = await testDb.db
+      .select({ attemptNumber: deliveryAttempts.attemptNumber, code: deliveryAttempts.statusCode })
+      .from(deliveryAttempts)
+      .where(eq(deliveryAttempts.deliveryId, id as string))
+      .orderBy(deliveryAttempts.attemptNumber);
+    expect(attempts).toEqual([
+      { attemptNumber: 1, code: 503 },
+      { attemptNumber: 2, code: 200 },
+    ]);
+    expect(receiver.received).toHaveLength(2);
   });
 });

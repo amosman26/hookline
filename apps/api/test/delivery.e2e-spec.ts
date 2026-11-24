@@ -55,6 +55,7 @@ describeWithServices("event delivery, end to end", () => {
       db: testDb.db,
       connection: redisConnection(redisUrl as string),
       prefix,
+      retryDelay: () => 100,
     });
     await worker.waitUntilReady();
   });
@@ -140,19 +141,45 @@ describeWithServices("event delivery, end to end", () => {
     ]);
   });
 
-  it("records a failed attempt when the endpoint answers with an error", async () => {
+  it("retries after a 503 and delivers when the endpoint recovers", async () => {
     await createEndpoint(["payout.failed"]);
-    receiver.respond = () => ({ status: 503, body: "maintenance" });
+    let calls = 0;
+    receiver.respond = () => {
+      calls += 1;
+      return calls === 1 ? { status: 503, body: "maintenance" } : { status: 200, body: "ok" };
+    };
 
     const res = await post("/v1/events")
       .send({ type: "payout.failed", payload: { id: "po_7" } })
       .expect(202);
     const deliveryId = (res.body as { deliveries: { id: string }[] }).deliveries[0]?.id as string;
 
+    expect(await settled(deliveryId)).toMatchObject({ status: "succeeded", attemptCount: 2 });
+    expect(receiver.received).toHaveLength(2);
+    const attempts = await attemptsOf(deliveryId);
+    expect(attempts.sort((x, y) => x.attemptNumber - y.attemptNumber)).toEqual([
+      expect.objectContaining({ attemptNumber: 1, statusCode: 503, responseBody: "maintenance" }),
+      expect.objectContaining({ attemptNumber: 2, statusCode: 200, responseBody: "ok" }),
+    ]);
+  });
+
+  it("fails at once when the endpoint rejects the event with a 4xx", async () => {
+    await createEndpoint(["refund.failed"]);
+    receiver.respond = () => ({ status: 422, body: "unknown payout" });
+
+    const res = await post("/v1/events")
+      .send({ type: "refund.failed", payload: { id: "re_8" } })
+      .expect(202);
+    const deliveryId = (res.body as { deliveries: { id: string }[] }).deliveries[0]?.id as string;
+
     expect(await settled(deliveryId)).toMatchObject({ status: "failed", attemptCount: 1 });
     expect(receiver.received).toHaveLength(1);
     expect(await attemptsOf(deliveryId)).toEqual([
-      expect.objectContaining({ attemptNumber: 1, statusCode: 503, responseBody: "maintenance" }),
+      expect.objectContaining({
+        attemptNumber: 1,
+        statusCode: 422,
+        responseBody: "unknown payout",
+      }),
     ]);
   });
 

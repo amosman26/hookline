@@ -2,6 +2,7 @@ import { deliveries, deliveryAttempts, endpoints, events, projects } from "@hook
 import { verify } from "@hookline/signing";
 import { asc, eq } from "drizzle-orm";
 import { deliver, USER_AGENT } from "../src/deliver";
+import { MAX_ATTEMPTS, RETRY_DELAY_MS } from "../src/retry";
 import { RESPONSE_BODY_LIMIT } from "../src/send";
 import { Receiver } from "./support/receiver";
 import { createTestDatabase, describeWithDb, type TestDatabase } from "./support/test-database";
@@ -28,7 +29,10 @@ describeWithDb("deliver", () => {
   });
 
   /** A pending delivery of one `invoice.paid` event to one endpoint. */
-  async function pendingDelivery(endpoint: { url?: string; enabled?: boolean } = {}) {
+  async function pendingDelivery(
+    endpoint: { url?: string; enabled?: boolean } = {},
+    attemptCount = 0,
+  ) {
     const [project] = await testDb.db.insert(projects).values({ name: "Acme" }).returning();
     if (!project) throw new Error("insert returned no row");
     const [ep] = await testDb.db
@@ -48,7 +52,7 @@ describeWithDb("deliver", () => {
     if (!ep || !event) throw new Error("insert returned no row");
     const [delivery] = await testDb.db
       .insert(deliveries)
-      .values({ projectId: project.id, eventId: event.id, endpointId: ep.id })
+      .values({ projectId: project.id, eventId: event.id, endpointId: ep.id, attemptCount })
       .returning();
     if (!delivery) throw new Error("insert returned no row");
     return { delivery, event };
@@ -71,7 +75,7 @@ describeWithDb("deliver", () => {
     const { delivery, event } = await pendingDelivery();
     receiver.respond = () => ({ status: 204 });
 
-    await expect(deliver(testDb.db, delivery.id)).resolves.toBe("succeeded");
+    await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({ outcome: "succeeded" });
 
     expect(receiver.received).toHaveLength(1);
     const [req] = receiver.received;
@@ -108,40 +112,125 @@ describeWithDb("deliver", () => {
     ]);
   });
 
-  it("records a non-2xx response as a failed attempt with its body", async () => {
+  it("keeps the delivery pending after a 5xx and asks for a retry", async () => {
     const { delivery } = await pendingDelivery();
     receiver.respond = () => ({ status: 500, body: "x".repeat(RESPONSE_BODY_LIMIT + 100) });
 
-    await expect(deliver(testDb.db, delivery.id)).resolves.toBe("failed");
+    await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({
+      outcome: "retrying",
+      retryInMs: RETRY_DELAY_MS,
+    });
 
     const { delivery: after, attempts } = await state(delivery.id);
-    expect(after).toMatchObject({ status: "failed", attemptCount: 1 });
+    expect(after).toMatchObject({ status: "pending", attemptCount: 1 });
     expect(attempts).toHaveLength(1);
     expect(attempts[0]).toMatchObject({ statusCode: 500, error: null });
     expect(attempts[0]?.responseBody).toHaveLength(RESPONSE_BODY_LIMIT);
   });
 
-  it("records a connection error with no status code", async () => {
+  it.each([408, 429, 503])("retries a %i", async (code) => {
+    const { delivery } = await pendingDelivery();
+    receiver.respond = () => ({ status: code });
+
+    const result = await deliver(testDb.db, delivery.id);
+
+    expect(result.outcome).toBe("retrying");
+    expect((await state(delivery.id)).delivery?.status).toBe("pending");
+  });
+
+  it("records the next attempt with the next number", async () => {
+    const { delivery } = await pendingDelivery();
+    receiver.respond = () => ({ status: 503 });
+    await deliver(testDb.db, delivery.id);
+    receiver.respond = () => ({ status: 200, body: "ok" });
+
+    await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({ outcome: "succeeded" });
+
+    const { delivery: after, attempts } = await state(delivery.id);
+    expect(after).toMatchObject({ status: "succeeded", attemptCount: 2 });
+    expect(attempts.map((a) => [a.attemptNumber, a.statusCode])).toEqual([
+      [1, 503],
+      [2, 200],
+    ]);
+  });
+
+  it("uses the retry delay it is given", async () => {
+    const { delivery } = await pendingDelivery({}, 2);
+    receiver.respond = () => ({ status: 502 });
+    const seen: number[] = [];
+
+    const result = await deliver(testDb.db, delivery.id, {
+      retryDelay: (attempt) => {
+        seen.push(attempt);
+        return 250;
+      },
+    });
+
+    expect(result).toEqual({ outcome: "retrying", retryInMs: 250 });
+    expect(seen).toEqual([3]);
+  });
+
+  it("waits as long as a 429's Retry-After asks", async () => {
+    const { delivery } = await pendingDelivery();
+    const send = async () => ({
+      statusCode: 429,
+      durationMs: 1,
+      responseBody: "slow down",
+      error: null,
+      retryAfter: "120",
+    });
+
+    await expect(deliver(testDb.db, delivery.id, { send })).resolves.toEqual({
+      outcome: "retrying",
+      retryInMs: 120_000,
+    });
+  });
+
+  it("fails at once on a 4xx that is not 408 or 429", async () => {
+    const { delivery } = await pendingDelivery();
+    receiver.respond = () => ({ status: 410, body: "gone" });
+
+    await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({ outcome: "failed" });
+
+    const { delivery: after, attempts } = await state(delivery.id);
+    expect(after).toMatchObject({ status: "failed", attemptCount: 1 });
+    expect(attempts[0]).toMatchObject({ statusCode: 410, responseBody: "gone" });
+  });
+
+  it("fails once the last allowed attempt is used up", async () => {
+    const { delivery } = await pendingDelivery({}, MAX_ATTEMPTS - 1);
+    receiver.respond = () => ({ status: 503 });
+
+    await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({ outcome: "failed" });
+
+    const { delivery: after, attempts } = await state(delivery.id);
+    expect(after).toMatchObject({ status: "failed", attemptCount: MAX_ATTEMPTS });
+    expect(attempts).toEqual([expect.objectContaining({ attemptNumber: MAX_ATTEMPTS })]);
+  });
+
+  it("retries a connection error, recorded with no status code", async () => {
     // A port that was just free; fetch refuses well-known ones like 1 outright.
     const closed = new Receiver();
     await closed.start();
     await closed.stop();
     const { delivery } = await pendingDelivery({ url: closed.url });
 
-    await expect(deliver(testDb.db, delivery.id)).resolves.toBe("failed");
+    const result = await deliver(testDb.db, delivery.id);
 
+    expect(result.outcome).toBe("retrying");
     const { attempts } = await state(delivery.id);
     expect(attempts[0]).toMatchObject({ statusCode: null, responseBody: null });
     expect(attempts[0]?.error).toMatch(/ECONNREFUSED/);
   });
 
-  it("does not call a disabled endpoint and fails the delivery", async () => {
+  it("does not call a disabled endpoint and fails the delivery without retrying", async () => {
     const { delivery } = await pendingDelivery({ enabled: false });
 
-    await expect(deliver(testDb.db, delivery.id)).resolves.toBe("failed");
+    await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({ outcome: "failed" });
 
     expect(receiver.received).toHaveLength(0);
-    const { attempts } = await state(delivery.id);
+    const { delivery: after, attempts } = await state(delivery.id);
+    expect(after?.status).toBe("failed");
     expect(attempts[0]).toMatchObject({ statusCode: null, error: "endpoint is disabled" });
   });
 
@@ -149,7 +238,7 @@ describeWithDb("deliver", () => {
     const { delivery } = await pendingDelivery();
     await deliver(testDb.db, delivery.id);
 
-    await expect(deliver(testDb.db, delivery.id)).resolves.toBe("skipped");
+    await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({ outcome: "skipped" });
 
     expect(receiver.received).toHaveLength(1);
     expect((await state(delivery.id)).attempts).toHaveLength(1);
@@ -159,7 +248,7 @@ describeWithDb("deliver", () => {
     const { delivery } = await pendingDelivery();
     await testDb.db.delete(deliveries).where(eq(deliveries.id, delivery.id));
 
-    await expect(deliver(testDb.db, delivery.id)).resolves.toBe("skipped");
+    await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({ outcome: "skipped" });
     expect(receiver.received).toHaveLength(0);
   });
 
@@ -170,7 +259,7 @@ describeWithDb("deliver", () => {
     // Both runs read the delivery as pending, then both send.
     const slowSend = async () => {
       await gate;
-      return { statusCode: 200, durationMs: 1, responseBody: "ok", error: null };
+      return { statusCode: 200, durationMs: 1, responseBody: "ok", error: null, retryAfter: null };
     };
 
     const runs = Promise.all([
@@ -180,7 +269,7 @@ describeWithDb("deliver", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     release();
 
-    expect((await runs).sort()).toEqual(["skipped", "succeeded"]);
+    expect((await runs).map((r) => r.outcome).sort()).toEqual(["skipped", "succeeded"]);
     const { delivery: after, attempts } = await state(delivery.id);
     expect(after).toMatchObject({ status: "succeeded", attemptCount: 1 });
     expect(attempts).toHaveLength(1);

@@ -34,9 +34,12 @@ Working today (v0.1.0):
   re-queues any delivery still pending, so a Redis outage or a missed enqueue
   doesn't lose work.
 
-Not yet: retries (a non-2xx response or network error currently marks the delivery
-`failed`), dead-lettering, replay, idempotency keys, rate limiting, a timestamp
-tolerance in the verifier, the dashboard and OpenAPI docs.
+On main since v0.1.0: timeouts, network errors, 408, 429 and 5xx are retried (a
+fixed 5 s apart, longer if `Retry-After` asks, up to 12 attempts); any other 4xx
+fails the delivery at once.
+
+Not yet: exponential backoff, dead-lettering, replay, idempotency keys, rate
+limiting, a timestamp tolerance in the verifier, the dashboard and OpenAPI docs.
 
 ## Architecture
 

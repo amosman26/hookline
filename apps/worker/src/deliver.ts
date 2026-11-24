@@ -9,18 +9,38 @@ import {
 } from "@hookline/db";
 import { sign } from "@hookline/signing";
 import { and, eq } from "drizzle-orm";
+import {
+  classifyAttempt,
+  MAX_ATTEMPTS,
+  nextRetryDelay,
+  parseRetryAfter,
+  RETRY_DELAY_MS,
+  type AttemptVerdict,
+} from "./retry";
 import { send as defaultSend, type SendResult, type WebhookRequest } from "./send";
 
 export const USER_AGENT = "Hookline/0.1";
 
-/** What one run of a delivery job did. */
-export type DeliveryOutcome = "succeeded" | "failed" | "skipped";
+/**
+ * What one run of a delivery job did. `retrying` means the attempt failed in
+ * a way worth trying again: the delivery stays `pending` and the caller
+ * should run it again after `retryInMs`.
+ */
+export type DeliveryResult =
+  { outcome: "succeeded" | "failed" | "skipped" } | { outcome: "retrying"; retryInMs: number };
+
+export type DeliveryOutcome = DeliveryResult["outcome"];
 
 export interface DeliverOptions {
   /** Swappable for tests; defaults to a real HTTP POST. */
   send?: (request: WebhookRequest) => Promise<SendResult>;
   /** Signing time in Unix seconds; defaults to now. */
   now?: () => number;
+  /**
+   * Wait in milliseconds after the given failed attempt (1-based). Tests use
+   * a short one; Retry-After can still lengthen it.
+   */
+  retryDelay?: (attemptNumber: number) => number;
 }
 
 /** The JSON body every endpoint receives. */
@@ -57,14 +77,16 @@ export function webhookRequest(
  * same delivery: anything no longer `pending` is skipped, and the attempt is
  * only recorded if the delivery is still where it was when we read it.
  *
- * Retries come later (H15/H16). For now any 2xx is `succeeded` and anything
- * else, including no response, is `failed`.
+ * A 2xx is `succeeded`. A failure worth retrying (see classifyAttempt) keeps
+ * the delivery `pending` and returns `retrying` with the wait, until the
+ * delivery has had MAX_ATTEMPTS; then it is `failed`. Any other failure, and
+ * a disabled endpoint, is `failed` straight away.
  */
 export async function deliver(
   db: Database,
   deliveryId: string,
   options: DeliverOptions = {},
-): Promise<DeliveryOutcome> {
+): Promise<DeliveryResult> {
   const [row] = await db
     .select({ delivery: deliveries, event: events, endpoint: endpoints })
     .from(deliveries)
@@ -73,15 +95,24 @@ export async function deliver(
     .where(eq(deliveries.id, deliveryId));
 
   // Deleted with its endpoint or project, or already finished.
-  if (!row || row.delivery.status !== "pending") return "skipped";
+  if (!row || row.delivery.status !== "pending") return { outcome: "skipped" };
 
-  const result: SendResult = row.endpoint.enabled
+  const enabled = row.endpoint.enabled;
+  const result: SendResult = enabled
     ? await (options.send ?? defaultSend)(webhookRequest(row.event, row.endpoint, options.now?.()))
-    : { statusCode: null, durationMs: 0, responseBody: null, error: "endpoint is disabled" };
+    : {
+        statusCode: null,
+        durationMs: 0,
+        responseBody: null,
+        error: "endpoint is disabled",
+        retryAfter: null,
+      };
 
-  const ok = result.statusCode !== null && result.statusCode >= 200 && result.statusCode < 300;
-  const status = ok ? "succeeded" : "failed";
   const attemptNumber = row.delivery.attemptCount + 1;
+  // A disabled endpoint stays disabled until someone acts, so don't wait on it.
+  const verdict: AttemptVerdict = enabled ? classifyAttempt(result.statusCode) : "permanent";
+  const willRetry = verdict === "retry" && attemptNumber < MAX_ATTEMPTS;
+  const status = verdict === "success" ? "succeeded" : willRetry ? "pending" : "failed";
 
   const recorded = await db.transaction(async (tx) => {
     // Compare-and-set on attempt_count: if another run got here first, its
@@ -99,9 +130,21 @@ export async function deliver(
       .returning({ id: deliveries.id });
     if (updated.length === 0) return false;
 
-    await tx.insert(deliveryAttempts).values({ deliveryId, attemptNumber, ...result });
+    await tx.insert(deliveryAttempts).values({
+      deliveryId,
+      attemptNumber,
+      statusCode: result.statusCode,
+      durationMs: result.durationMs,
+      responseBody: result.responseBody,
+      error: result.error,
+    });
     return true;
   });
 
-  return recorded ? status : "skipped";
+  if (!recorded) return { outcome: "skipped" };
+  if (status !== "pending") return { outcome: status };
+
+  const policyDelay = (options.retryDelay ?? (() => RETRY_DELAY_MS))(attemptNumber);
+  const retryAfter = parseRetryAfter(result.retryAfter, Date.now());
+  return { outcome: "retrying", retryInMs: nextRetryDelay(policyDelay, retryAfter) };
 }
