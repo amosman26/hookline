@@ -24,10 +24,13 @@ export const USER_AGENT = "Hookline/0.1";
 /**
  * What one run of a delivery job did. `retrying` means the attempt failed in
  * a way worth trying again: the delivery stays `pending` and the caller
- * should run it again after `retryInMs`.
+ * should run it again after `retryInMs`. `dead` means it kept failing in a
+ * retryable way until it ran out of attempts: it is dead-lettered and waits
+ * for someone to replay it.
  */
 export type DeliveryResult =
-  { outcome: "succeeded" | "failed" | "skipped" } | { outcome: "retrying"; retryInMs: number };
+  | { outcome: "succeeded" | "failed" | "dead" | "skipped" }
+  | { outcome: "retrying"; retryInMs: number };
 
 export type DeliveryOutcome = DeliveryResult["outcome"];
 
@@ -42,6 +45,16 @@ export interface DeliverOptions {
    * fixed one. Retry-After can still lengthen it.
    */
   retryDelay?: (attemptNumber: number) => number;
+}
+
+/** Where a pending delivery stands after the given attempt (1-based). */
+export function statusAfter(
+  verdict: AttemptVerdict,
+  attemptNumber: number,
+): "succeeded" | "pending" | "failed" | "dead" {
+  if (verdict === "success") return "succeeded";
+  if (verdict === "permanent") return "failed";
+  return attemptNumber < MAX_ATTEMPTS ? "pending" : "dead";
 }
 
 /** The JSON body every endpoint receives. */
@@ -80,8 +93,9 @@ export function webhookRequest(
  *
  * A 2xx is `succeeded`. A failure worth retrying (see classifyAttempt) keeps
  * the delivery `pending` and returns `retrying` with the wait, until the
- * delivery has had MAX_ATTEMPTS; then it is `failed`. Any other failure, and
- * a disabled endpoint, is `failed` straight away.
+ * delivery has had MAX_ATTEMPTS; then it is `dead` (dead-lettered). Any other
+ * failure, and a disabled endpoint, is `failed` straight away: `failed` means
+ * the receiver refused it, `dead` means we gave up waiting for the receiver.
  */
 export async function deliver(
   db: Database,
@@ -112,8 +126,7 @@ export async function deliver(
   const attemptNumber = row.delivery.attemptCount + 1;
   // A disabled endpoint stays disabled until someone acts, so don't wait on it.
   const verdict: AttemptVerdict = enabled ? classifyAttempt(result.statusCode) : "permanent";
-  const willRetry = verdict === "retry" && attemptNumber < MAX_ATTEMPTS;
-  const status = verdict === "success" ? "succeeded" : willRetry ? "pending" : "failed";
+  const status = statusAfter(verdict, attemptNumber);
 
   const recorded = await db.transaction(async (tx) => {
     // Compare-and-set on attempt_count: if another run got here first, its

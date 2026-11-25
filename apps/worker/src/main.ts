@@ -38,7 +38,10 @@ async function main(): Promise<void> {
   const worker = createDeliveryWorker({ db, connection, concurrency, prefix });
 
   worker.on("completed", (job, outcome) => {
-    console.log(`delivery ${job.data.deliveryId}: ${outcome}`);
+    const line = `delivery ${job.data.deliveryId}: ${outcome}`;
+    // Dead-lettered work needs a person (or a replay), so make it stand out.
+    if (outcome === "dead") console.warn(`${line} (out of retries, dead-lettered)`);
+    else console.log(line);
   });
   worker.on("failed", (job, error) => {
     console.error(`delivery ${job?.data.deliveryId ?? "?"}: job failed: ${error.message}`);

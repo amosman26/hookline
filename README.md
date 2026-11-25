@@ -37,9 +37,11 @@ Working today (v0.1.0):
 On main since v0.1.0: timeouts, network errors, 408, 429 and 5xx are retried with
 exponential backoff and full jitter (a random wait up to 5 s, then up to 10 s, 20 s
 and so on, longer if `Retry-After` asks, up to 12 attempts); any other 4xx fails the
-delivery at once.
+delivery at once. A delivery still failing after its 12th attempt is dead-lettered:
+its status becomes `dead`, kept apart from `failed` (refused by the receiver), and the
+worker logs a warning.
 
-Not yet: dead-lettering, replay, idempotency keys, rate limiting, a timestamp
+Not yet: replay, idempotency keys, rate limiting, a timestamp
 tolerance in the verifier, the dashboard and OpenAPI docs.
 
 ## Architecture

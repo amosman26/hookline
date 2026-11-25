@@ -200,15 +200,41 @@ describeWithDb("deliver", () => {
     expect(attempts[0]).toMatchObject({ statusCode: 410, responseBody: "gone" });
   });
 
-  it("fails once the last allowed attempt is used up", async () => {
+  it("dead-letters a delivery whose last allowed attempt is still retryable", async () => {
     const { delivery } = await pendingDelivery({}, MAX_ATTEMPTS - 1);
     receiver.respond = () => ({ status: 503 });
 
-    await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({ outcome: "failed" });
+    await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({ outcome: "dead" });
 
     const { delivery: after, attempts } = await state(delivery.id);
+    expect(after).toMatchObject({ status: "dead", attemptCount: MAX_ATTEMPTS });
+    expect(attempts).toEqual([
+      expect.objectContaining({ attemptNumber: MAX_ATTEMPTS, statusCode: 503 }),
+    ]);
+  });
+
+  it("still fails, not dead-letters, a permanent refusal on the last attempt", async () => {
+    const { delivery } = await pendingDelivery({}, MAX_ATTEMPTS - 1);
+    receiver.respond = () => ({ status: 404 });
+
+    await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({ outcome: "failed" });
+
+    const { delivery: after } = await state(delivery.id);
     expect(after).toMatchObject({ status: "failed", attemptCount: MAX_ATTEMPTS });
-    expect(attempts).toEqual([expect.objectContaining({ attemptNumber: MAX_ATTEMPTS })]);
+  });
+
+  it("leaves a dead delivery alone if its job runs again", async () => {
+    const { delivery } = await pendingDelivery({}, MAX_ATTEMPTS - 1);
+    receiver.respond = () => ({ status: 500 });
+    await deliver(testDb.db, delivery.id);
+    receiver.received.length = 0;
+
+    await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({ outcome: "skipped" });
+
+    expect(receiver.received).toHaveLength(0);
+    const { delivery: after, attempts } = await state(delivery.id);
+    expect(after?.status).toBe("dead");
+    expect(attempts).toHaveLength(1);
   });
 
   it("retries a connection error, recorded with no status code", async () => {
