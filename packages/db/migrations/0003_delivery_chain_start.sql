@@ -1,0 +1,1 @@
+ALTER TABLE "deliveries" ADD COLUMN "chain_start" integer DEFAULT 0 NOT NULL;

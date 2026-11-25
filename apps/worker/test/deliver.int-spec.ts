@@ -32,6 +32,7 @@ describeWithDb("deliver", () => {
   async function pendingDelivery(
     endpoint: { url?: string; enabled?: boolean } = {},
     attemptCount = 0,
+    chainStart = 0,
   ) {
     const [project] = await testDb.db.insert(projects).values({ name: "Acme" }).returning();
     if (!project) throw new Error("insert returned no row");
@@ -52,7 +53,13 @@ describeWithDb("deliver", () => {
     if (!ep || !event) throw new Error("insert returned no row");
     const [delivery] = await testDb.db
       .insert(deliveries)
-      .values({ projectId: project.id, eventId: event.id, endpointId: ep.id, attemptCount })
+      .values({
+        projectId: project.id,
+        eventId: event.id,
+        endpointId: ep.id,
+        attemptCount,
+        chainStart,
+      })
       .returning();
     if (!delivery) throw new Error("insert returned no row");
     return { delivery, event };
@@ -211,6 +218,33 @@ describeWithDb("deliver", () => {
     expect(attempts).toEqual([
       expect.objectContaining({ attemptNumber: MAX_ATTEMPTS, statusCode: 503 }),
     ]);
+  });
+
+  it("counts the retry budget and backoff from the start of a replayed chain", async () => {
+    // Replayed after dying: 12 attempts already made, the new chain starts there.
+    const { delivery } = await pendingDelivery({}, MAX_ATTEMPTS, MAX_ATTEMPTS);
+    receiver.respond = () => ({ status: 503 });
+    const seen: number[] = [];
+
+    const result = await deliver(testDb.db, delivery.id, {
+      retryDelay: (n) => {
+        seen.push(n);
+        return 100;
+      },
+    });
+
+    expect(result).toEqual({ outcome: "retrying", retryInMs: 100 });
+    expect(seen).toEqual([1]);
+    const { delivery: after, attempts } = await state(delivery.id);
+    expect(after).toMatchObject({ status: "pending", attemptCount: MAX_ATTEMPTS + 1 });
+    expect(attempts).toEqual([expect.objectContaining({ attemptNumber: MAX_ATTEMPTS + 1 })]);
+  });
+
+  it("dead-letters a replayed chain once it has used its own full budget", async () => {
+    const { delivery } = await pendingDelivery({}, 2 * MAX_ATTEMPTS - 1, MAX_ATTEMPTS);
+    receiver.respond = () => ({ status: 503 });
+
+    await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({ outcome: "dead" });
   });
 
   it("still fails, not dead-letters, a permanent refusal on the last attempt", async () => {

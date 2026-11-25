@@ -39,9 +39,11 @@ exponential backoff and full jitter (a random wait up to 5 s, then up to 10 s, 2
 and so on, longer if `Retry-After` asks, up to 12 attempts); any other 4xx fails the
 delivery at once. A delivery still failing after its 12th attempt is dead-lettered:
 its status becomes `dead`, kept apart from `failed` (refused by the receiver), and the
-worker logs a warning.
+worker logs a warning. `POST /v1/deliveries/:id/replay` puts a `failed` or `dead`
+delivery back in the queue with a fresh set of 12 attempts; earlier attempts stay in
+its history and the event keeps its `Hookline-Id`.
 
-Not yet: replay, idempotency keys, rate limiting, a timestamp
+Not yet: idempotency keys, rate limiting, a timestamp
 tolerance in the verifier, the dashboard and OpenAPI docs.
 
 ## Architecture
@@ -139,16 +141,17 @@ endpoint; the worker delivers it a moment later.
 Every route except `/health` needs `Authorization: Bearer <api key>` and only sees the
 key's own project. Bodies are JSON; unknown fields are rejected with `400`.
 
-| Method   | Path                | Purpose                                                    |
-| -------- | ------------------- | ---------------------------------------------------------- |
-| `GET`    | `/health`           | Liveness check, no auth                                    |
-| `GET`    | `/v1/project`       | The project the key belongs to                             |
-| `POST`   | `/v1/endpoints`     | Register an endpoint; returns its secret once              |
-| `GET`    | `/v1/endpoints`     | List endpoints                                             |
-| `GET`    | `/v1/endpoints/:id` | Fetch one endpoint                                         |
-| `PATCH`  | `/v1/endpoints/:id` | Change `url`, `description`, `eventTypes` or `enabled`     |
-| `DELETE` | `/v1/endpoints/:id` | Remove an endpoint and its deliveries                      |
-| `POST`   | `/v1/events`        | Accept `{ type, payload }` and fan it out (`202 Accepted`) |
+| Method   | Path                        | Purpose                                                            |
+| -------- | --------------------------- | ------------------------------------------------------------------ |
+| `GET`    | `/health`                   | Liveness check, no auth                                            |
+| `GET`    | `/v1/project`               | The project the key belongs to                                     |
+| `POST`   | `/v1/endpoints`             | Register an endpoint; returns its secret once                      |
+| `GET`    | `/v1/endpoints`             | List endpoints                                                     |
+| `GET`    | `/v1/endpoints/:id`         | Fetch one endpoint                                                 |
+| `PATCH`  | `/v1/endpoints/:id`         | Change `url`, `description`, `eventTypes` or `enabled`             |
+| `DELETE` | `/v1/endpoints/:id`         | Remove an endpoint and its deliveries                              |
+| `POST`   | `/v1/events`                | Accept `{ type, payload }` and fan it out (`202 Accepted`)         |
+| `POST`   | `/v1/deliveries/:id/replay` | Queue a `failed` or `dead` delivery again (`202`; `409` otherwise) |
 
 Endpoint URLs must be `http` or `https` without credentials. Event types are 1–100
 characters of letters, digits and `._:-`, starting with a letter or digit; an endpoint
@@ -208,7 +211,7 @@ local receiver and checks the signature.
 
 ```text
 apps/
-  api/        NestJS REST API: auth, endpoints, events, create-key CLI
+  api/        NestJS REST API: auth, endpoints, events, replay, create-key CLI
   worker/     BullMQ consumer that signs, sends and records attempts
 packages/
   db/         Drizzle schema, SQL migrations and migrate CLI

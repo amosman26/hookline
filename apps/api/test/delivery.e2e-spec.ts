@@ -183,6 +183,83 @@ describeWithServices("event delivery, end to end", () => {
     ]);
   });
 
+  async function deliveryFor(type: string): Promise<string> {
+    const res = await post("/v1/events")
+      .send({ type, payload: { id: "x_1" } })
+      .expect(202);
+    return (res.body as { deliveries: { id: string }[] }).deliveries[0]?.id as string;
+  }
+
+  it("replays a failed delivery with the same event id once the endpoint is fixed", async () => {
+    await createEndpoint(["charge.failed"]);
+    receiver.respond = () => ({ status: 400, body: "bad schema" });
+    const deliveryId = await deliveryFor("charge.failed");
+    expect(await settled(deliveryId)).toMatchObject({ status: "failed", attemptCount: 1 });
+
+    receiver.respond = () => ({ status: 200, body: "ok" });
+    const res = await post(`/v1/deliveries/${deliveryId}/replay`).expect(202);
+    expect(res.body).toMatchObject({ id: deliveryId, status: "pending", attemptCount: 1 });
+
+    expect(await settled(deliveryId)).toMatchObject({ status: "succeeded", attemptCount: 2 });
+    const ids = receiver.received.map((r) => r.headers["hookline-id"]);
+    expect(ids).toHaveLength(2);
+    expect(ids[1]).toBe(ids[0]);
+    const attempts = await attemptsOf(deliveryId);
+    expect(attempts.sort((x, y) => x.attemptNumber - y.attemptNumber)).toEqual([
+      expect.objectContaining({ attemptNumber: 1, statusCode: 400 }),
+      expect.objectContaining({ attemptNumber: 2, statusCode: 200 }),
+    ]);
+  });
+
+  it("gives a replayed dead delivery a fresh set of attempts", async () => {
+    await createEndpoint(["sync.stalled"]);
+    receiver.respond = () => ({ status: 503 });
+    const deliveryId = await deliveryFor("sync.stalled");
+    expect(await settled(deliveryId)).toMatchObject({ status: "dead", attemptCount: 12 });
+
+    // Still down after the replay: the new chain retries instead of dying at once.
+    let calls = 0;
+    receiver.respond = () => {
+      calls += 1;
+      return calls === 1 ? { status: 503 } : { status: 200, body: "ok" };
+    };
+    await post(`/v1/deliveries/${deliveryId}/replay`).expect(202);
+
+    expect(await settled(deliveryId)).toMatchObject({
+      status: "succeeded",
+      attemptCount: 14,
+      chainStart: 12,
+    });
+  });
+
+  it("refuses to replay a delivery that has not failed, or one it cannot find", async () => {
+    await createEndpoint(["seat.added"]);
+    const deliveryId = await deliveryFor("seat.added");
+    expect(await settled(deliveryId)).toMatchObject({ status: "succeeded" });
+
+    const conflict = await post(`/v1/deliveries/${deliveryId}/replay`).expect(409);
+    expect(conflict.body.message).toMatch(/delivery is succeeded/);
+    await post(`/v1/deliveries/${randomUUID()}/replay`).expect(404);
+    await post("/v1/deliveries/not-a-uuid/replay").expect(400);
+  });
+
+  it("refuses to replay to a disabled endpoint", async () => {
+    const endpoint = await createEndpoint(["seat.removed"]);
+    receiver.respond = () => ({ status: 410 });
+    const deliveryId = await deliveryFor("seat.removed");
+    expect(await settled(deliveryId)).toMatchObject({ status: "failed" });
+    await request(app.getHttpServer())
+      .patch(`/v1/endpoints/${endpoint.id}`)
+      .set("Authorization", `Bearer ${key}`)
+      .send({ enabled: false })
+      .expect(200);
+
+    const res = await post(`/v1/deliveries/${deliveryId}/replay`).expect(409);
+    expect(res.body.message).toMatch(/endpoint is disabled/);
+    const [row] = await testDb.db.select().from(deliveries).where(eq(deliveries.id, deliveryId));
+    expect(row?.status).toBe("failed");
+  });
+
   it("fans one event out to every subscribed endpoint and delivers each once", async () => {
     await createEndpoint(["user.created"]);
     await createEndpoint(["user.created", "user.deleted"]);

@@ -22,6 +22,13 @@
       "when": 1795198551418,
       "tag": "0002_delivery_attempts",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1795630600413,
+      "tag": "0003_delivery_chain_start",
+      "breakpoints": true
     }
   ]
 }

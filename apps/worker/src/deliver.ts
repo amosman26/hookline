@@ -40,21 +40,25 @@ export interface DeliverOptions {
   /** Signing time in Unix seconds; defaults to now. */
   now?: () => number;
   /**
-   * Wait in milliseconds after the given failed attempt (1-based). Defaults
+   * Wait in milliseconds after the given failed attempt of the current chain
+   * (1-based, so a replay starts backing off from the base again). Defaults
    * to exponential backoff with full jitter (backoffDelay); tests use a short
    * fixed one. Retry-After can still lengthen it.
    */
   retryDelay?: (attemptNumber: number) => number;
 }
 
-/** Where a pending delivery stands after the given attempt (1-based). */
+/**
+ * Where a pending delivery stands after the given attempt of its current
+ * chain (1-based; a replay starts a new chain at 1).
+ */
 export function statusAfter(
   verdict: AttemptVerdict,
-  attemptNumber: number,
+  chainAttempt: number,
 ): "succeeded" | "pending" | "failed" | "dead" {
   if (verdict === "success") return "succeeded";
   if (verdict === "permanent") return "failed";
-  return attemptNumber < MAX_ATTEMPTS ? "pending" : "dead";
+  return chainAttempt < MAX_ATTEMPTS ? "pending" : "dead";
 }
 
 /** The JSON body every endpoint receives. */
@@ -93,7 +97,8 @@ export function webhookRequest(
  *
  * A 2xx is `succeeded`. A failure worth retrying (see classifyAttempt) keeps
  * the delivery `pending` and returns `retrying` with the wait, until the
- * delivery has had MAX_ATTEMPTS; then it is `dead` (dead-lettered). Any other
+ * delivery has had MAX_ATTEMPTS in its current chain; then it is `dead`
+ * (dead-lettered). A replay starts a new chain with a full budget. Any other
  * failure, and a disabled endpoint, is `failed` straight away: `failed` means
  * the receiver refused it, `dead` means we gave up waiting for the receiver.
  */
@@ -124,9 +129,10 @@ export async function deliver(
       };
 
   const attemptNumber = row.delivery.attemptCount + 1;
+  const chainAttempt = attemptNumber - row.delivery.chainStart;
   // A disabled endpoint stays disabled until someone acts, so don't wait on it.
   const verdict: AttemptVerdict = enabled ? classifyAttempt(result.statusCode) : "permanent";
-  const status = statusAfter(verdict, attemptNumber);
+  const status = statusAfter(verdict, chainAttempt);
 
   const recorded = await db.transaction(async (tx) => {
     // Compare-and-set on attempt_count: if another run got here first, its
@@ -158,7 +164,7 @@ export async function deliver(
   if (!recorded) return { outcome: "skipped" };
   if (status !== "pending") return { outcome: status };
 
-  const policyDelay = (options.retryDelay ?? backoffDelay)(attemptNumber);
+  const policyDelay = (options.retryDelay ?? backoffDelay)(chainAttempt);
   const retryAfter = parseRetryAfter(result.retryAfter, Date.now());
   return { outcome: "retrying", retryInMs: nextRetryDelay(policyDelay, retryAfter) };
 }

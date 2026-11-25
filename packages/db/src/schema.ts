@@ -99,6 +99,7 @@ export const events = pgTable(
 /**
  * Where one event stands with one endpoint. `pending` until it is delivered
  * (`succeeded`), refused for good (`failed`) or out of retries (`dead`).
+ * Replaying a `failed` or `dead` delivery makes it `pending` again.
  */
 export const deliveryStatus = pgEnum("delivery_status", ["pending", "succeeded", "failed", "dead"]);
 
@@ -122,6 +123,13 @@ export const deliveries = pgTable(
       .references(() => endpoints.id, { onDelete: "cascade" }),
     status: deliveryStatus("status").notNull().default("pending"),
     attemptCount: integer("attempt_count").notNull().default(0),
+    /**
+     * attempt_count when the current attempt chain began: 0 at first, then
+     * the count at the latest replay. The retry budget and backoff run from
+     * here, so a replay gets a full set of attempts while attempt numbers keep
+     * counting up across chains.
+     */
+    chainStart: integer("chain_start").notNull().default(0),
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
