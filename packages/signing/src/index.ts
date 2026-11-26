@@ -8,6 +8,13 @@ export const TIMESTAMP_HEADER = "Hookline-Timestamp";
 export const SIGNATURE_HEADER = "Hookline-Signature";
 
 const VERSION = "v1";
+
+/**
+ * How far a Hookline-Timestamp may be from the verifier's clock, in seconds.
+ * Five minutes covers ordinary clock drift and a slow network while keeping
+ * the window for replaying a captured request short.
+ */
+export const DEFAULT_TOLERANCE_SECONDS = 5 * 60;
 const HEX_SHA256 = /^[0-9a-f]{64}$/;
 const UNIX_SECONDS = /^\d{1,12}$/;
 
@@ -91,22 +98,38 @@ export interface VerifyInput {
   body: Payload;
   /** The endpoint's signing secret. */
   secret: string;
+  /**
+   * Largest accepted distance between the timestamp and `now`, in seconds.
+   * Defaults to DEFAULT_TOLERANCE_SECONDS. `Infinity` turns the check off,
+   * for example to verify a stored request later.
+   */
+  toleranceSeconds?: number;
+  /** The verifier's clock in Unix seconds. Defaults to now; set it in tests. */
+  now?: number;
 }
 
 /**
- * True when any `v1=` signature in the header matches. Comparison is
- * constant-time so response timing leaks nothing about the expected MAC.
- * Unknown versions are ignored, so a future v2 can be sent alongside v1.
+ * True when the timestamp is within the tolerance of `now` and any `v1=`
+ * signature in the header matches. Comparison is constant-time so response
+ * timing leaks nothing about the expected MAC. Unknown versions are ignored,
+ * so a future v2 can be sent alongside v1.
  *
- * This checks authenticity only. Checking that the timestamp is recent is a
- * separate policy decision; until the verifier enforces a window, callers
- * should reject old timestamps themselves.
+ * Timestamps too far in the future are refused as well as old ones: a
+ * request signed ahead of time would otherwise stay replayable for longer
+ * than the window. A request rejected only for its age is never retried
+ * with the same timestamp; Hookline signs every attempt afresh.
  */
 export function verify(input: VerifyInput): boolean {
   const { id, timestamp, signature, body, secret } = input;
+  const tolerance = input.toleranceSeconds ?? DEFAULT_TOLERANCE_SECONDS;
+  if (Number.isNaN(tolerance) || tolerance < 0) {
+    throw new TypeError("toleranceSeconds must be a non-negative number");
+  }
   if (!id || id.includes(".") || !timestamp || !UNIX_SECONDS.test(timestamp) || !signature) {
     return false;
   }
+  const now = input.now ?? Math.floor(Date.now() / 1000);
+  if (Math.abs(now - Number(timestamp)) > tolerance) return false;
   const expected = Buffer.from(computeSignature(secret, id, timestamp, body), "hex");
 
   let matched = false;

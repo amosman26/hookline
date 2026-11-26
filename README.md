@@ -47,8 +47,10 @@ the original event back (`202`, `Idempotent-Replayed: true`, deliveries with the
 current status) and nothing is stored or queued twice; the same key with a different
 event is refused with `422`. Keys are scoped to the project and don't expire yet.
 
-Not yet: rate limiting, a timestamp
-tolerance in the verifier, the dashboard and OpenAPI docs.
+The signing package's `verify()` now rejects timestamps more than five minutes from
+the receiver's clock, in either direction.
+
+Not yet: rate limiting, secret rotation from the API, the dashboard and OpenAPI docs.
 
 ## Architecture
 
@@ -185,6 +187,9 @@ header carries several space-separated `v1=` values; accept the request if any m
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 export function isValid(headers: Record<string, string>, rawBody: string, secret: string) {
+  // Refuse anything signed more than five minutes from now, either way.
+  const age = Math.abs(Date.now() / 1000 - Number(headers["hookline-timestamp"]));
+  if (!(age <= 300)) return false;
   const expected = createHmac("sha256", secret)
     .update(`${headers["hookline-id"]}.${headers["hookline-timestamp"]}.${rawBody}`)
     .digest();
@@ -196,8 +201,10 @@ export function isValid(headers: Record<string, string>, rawBody: string, secret
 }
 ```
 
-Verify against the raw body bytes, before any JSON parsing, and also reject timestamps
-more than a few minutes old to limit replays.
+Verify against the raw body bytes, before any JSON parsing. The timestamp check limits
+replays of a captured request to five minutes; every attempt is signed afresh, so a
+retry is never refused for its age. `verify()` in `packages/signing` does the same
+checks, with the tolerance adjustable.
 
 ## Testing
 

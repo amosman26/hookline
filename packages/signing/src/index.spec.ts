@@ -1,5 +1,6 @@
 import {
   computeSignature,
+  DEFAULT_TOLERANCE_SECONDS,
   ID_HEADER,
   sign,
   SIGNATURE_HEADER,
@@ -78,6 +79,7 @@ describe("verify", () => {
     signature: headers[SIGNATURE_HEADER],
     body,
     secret,
+    now: 1700000000,
   };
 
   it("accepts what sign produced", () => {
@@ -116,5 +118,55 @@ describe("verify", () => {
 
   it("skips unknown versions and junk next to a valid signature", () => {
     expect(verify({ ...valid, signature: `v2=abc junk v1=${VECTOR_TEST}` })).toBe(true);
+  });
+
+  describe("timestamp tolerance", () => {
+    const signedAt = 1700000000;
+
+    it("defaults to five minutes", () => {
+      expect(DEFAULT_TOLERANCE_SECONDS).toBe(300);
+    });
+
+    it.each([0, 1, 299, 300, -1, -300])(
+      "accepts a timestamp %p seconds from the verifier's clock",
+      (offset) => {
+        expect(verify({ ...valid, now: signedAt + offset })).toBe(true);
+      },
+    );
+
+    it.each([
+      ["older than five minutes", 301],
+      ["an hour old", 3600],
+      ["more than five minutes in the future", -301],
+    ])("rejects a valid signature %s", (_label, offset) => {
+      expect(verify({ ...valid, now: signedAt + offset })).toBe(false);
+    });
+
+    it("uses the system clock when now is not given", () => {
+      const fresh = sign({ id: "msg_1", body, secret });
+      const input = {
+        id: fresh[ID_HEADER],
+        timestamp: fresh[TIMESTAMP_HEADER],
+        signature: fresh[SIGNATURE_HEADER],
+        body,
+        secret,
+      };
+      expect(verify(input)).toBe(true);
+      expect(verify({ ...valid, now: undefined })).toBe(false);
+    });
+
+    it("takes a custom tolerance", () => {
+      expect(verify({ ...valid, now: signedAt + 30, toleranceSeconds: 10 })).toBe(false);
+      expect(verify({ ...valid, now: signedAt + 30, toleranceSeconds: 30 })).toBe(true);
+      expect(verify({ ...valid, now: signedAt + 1e9, toleranceSeconds: Infinity })).toBe(true);
+    });
+
+    it("still rejects a bad signature inside the window", () => {
+      expect(verify({ ...valid, secret: "whsec_other", toleranceSeconds: Infinity })).toBe(false);
+    });
+
+    it.each([-1, NaN])("refuses the tolerance %p", (toleranceSeconds) => {
+      expect(() => verify({ ...valid, toleranceSeconds })).toThrow(TypeError);
+    });
   });
 });
