@@ -41,9 +41,13 @@ delivery at once. A delivery still failing after its 12th attempt is dead-letter
 its status becomes `dead`, kept apart from `failed` (refused by the receiver), and the
 worker logs a warning. `POST /v1/deliveries/:id/replay` puts a `failed` or `dead`
 delivery back in the queue with a fresh set of 12 attempts; earlier attempts stay in
-its history and the event keeps its `Hookline-Id`.
+its history and the event keeps its `Hookline-Id`. `POST /v1/events` takes an
+optional `Idempotency-Key` header: a retry with the same key, type and payload gets
+the original event back (`202`, `Idempotent-Replayed: true`, deliveries with their
+current status) and nothing is stored or queued twice; the same key with a different
+event is refused with `422`. Keys are scoped to the project and don't expire yet.
 
-Not yet: idempotency keys, rate limiting, a timestamp
+Not yet: rate limiting, a timestamp
 tolerance in the verifier, the dashboard and OpenAPI docs.
 
 ## Architecture

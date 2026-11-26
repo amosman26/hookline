@@ -1,4 +1,4 @@
-import { EventInputError, parseCreateEvent } from "./event-input";
+import { EventInputError, parseCreateEvent, parseIdempotencyKey } from "./event-input";
 
 function problemsOf(body: unknown): string[] {
   try {
@@ -48,5 +48,21 @@ describe("parseCreateEvent", () => {
       expect.stringMatching(/^type must be/),
       "payload must be a JSON object",
     ]);
+  });
+});
+
+describe("parseIdempotencyKey", () => {
+  it("treats a missing header as no key", () => {
+    expect(parseIdempotencyKey(undefined)).toBeUndefined();
+  });
+
+  it.each(["k", "order-42:charge", "a b", "x".repeat(255)])("accepts %p", (key) => {
+    expect(parseIdempotencyKey(key)).toBe(key);
+  });
+
+  it.each(["", "x".repeat(256), "caf\u00e9", "tab\there", "line\nbreak"])("rejects %p", (key) => {
+    expect(() => parseIdempotencyKey(key)).toThrow(
+      new EventInputError(["Idempotency-Key must be 1-255 printable ASCII characters"]),
+    );
   });
 });

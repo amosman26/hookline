@@ -36,3 +36,21 @@ export function parseCreateEvent(value: unknown): CreateEventInput {
   if (problems.length > 0) throw new EventInputError(problems);
   return { type: value.type as string, payload: value.payload as Record<string, unknown> };
 }
+
+/** The rule an Idempotency-Key header must follow, as shown in error messages. */
+export const IDEMPOTENCY_KEY_RULE = "1-255 printable ASCII characters";
+
+const IDEMPOTENCY_KEY = /^[\x20-\x7e]{1,255}$/;
+
+/**
+ * Validates the optional Idempotency-Key header. Node has already trimmed
+ * surrounding whitespace and joined repeated headers with ", ", so a client
+ * sending the header twice gets a key that will not match either value alone.
+ */
+export function parseIdempotencyKey(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!IDEMPOTENCY_KEY.test(value)) {
+    throw new EventInputError([`Idempotency-Key must be ${IDEMPOTENCY_KEY_RULE}`]);
+  }
+  return value;
+}
