@@ -50,7 +50,15 @@ event is refused with `422`. Keys are scoped to the project and don't expire yet
 The signing package's `verify()` now rejects timestamps more than five minutes from
 the receiver's clock, in either direction.
 
-Not yet: rate limiting, secret rotation from the API, the dashboard and OpenAPI docs.
+`POST /v1/events` is rate-limited per API key: 600 requests a minute by default
+(`INGEST_RATE_LIMIT`, `INGEST_RATE_WINDOW_SECONDS`; `0` turns it off), counted in Redis
+so every API instance shares the budget. Responses carry `RateLimit-Limit`,
+`RateLimit-Remaining` and `RateLimit-Reset`; beyond the limit the API answers `429` with
+`Retry-After` and stores nothing. It is a fixed window, so up to twice the limit can get
+through around a window boundary. If Redis is unreachable the limit is skipped rather
+than refusing events.
+
+Not yet: secret rotation from the API, the dashboard and OpenAPI docs.
 
 ## Architecture
 

@@ -7,10 +7,12 @@ import {
   Post,
   Res,
   UnprocessableEntityException,
+  UseGuards,
 } from "@nestjs/common";
 import type { DeliveryStatus } from "@hookline/db";
 import type { Response } from "express";
 import { CurrentProject, type AuthenticatedProject } from "../auth/authenticated-project";
+import { IngestRateLimitGuard } from "../rate-limit/ingest-rate-limit.guard";
 import {
   EventInputError,
   parseCreateEvent,
@@ -52,8 +54,13 @@ export class EventsController {
    * A repeat with the same Idempotency-Key gets the original event back, also
    * with 202, marked by `Idempotent-Replayed: true`. Reusing a key for a
    * different event is 422, as in the IETF Idempotency-Key header draft.
+   *
+   * Each API key may send INGEST_RATE_LIMIT requests per window (429 with
+   * Retry-After beyond that). Idempotent replays count too: they still cost
+   * a database round trip.
    */
   @Post()
+  @UseGuards(IngestRateLimitGuard)
   @HttpCode(202)
   async create(
     @CurrentProject() auth: AuthenticatedProject,
