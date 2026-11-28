@@ -16,6 +16,7 @@ import { CurrentProject, type AuthenticatedProject } from "../auth/authenticated
 import {
   EndpointInputError,
   parseCreateEndpoint,
+  parseRotateSecret,
   parseUpdateEndpoint,
   type CreateEndpointInput,
   type UpdateEndpointInput,
@@ -28,22 +29,32 @@ export interface EndpointResponse {
   description: string | null;
   eventTypes: string[];
   enabled: boolean;
+  /**
+   * When the secret replaced by the latest rotation stops signing deliveries;
+   * null when only the current secret is in use.
+   */
+  previousSecretExpiresAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
-/** Returned once, on creation: the only time the signing secret is shown. */
+/** Returned on creation and rotation: the only times the signing secret is shown. */
 export interface CreatedEndpointResponse extends EndpointResponse {
   secret: string;
 }
 
 function toResponse(endpoint: Endpoint): EndpointResponse {
+  const expiresAt = endpoint.previousSecretExpiresAt;
   return {
     id: endpoint.id,
     url: endpoint.url,
     description: endpoint.description,
     eventTypes: endpoint.eventTypes,
     enabled: endpoint.enabled,
+    previousSecretExpiresAt:
+      endpoint.previousSecret !== null && expiresAt !== null && expiresAt.getTime() > Date.now()
+        ? expiresAt.toISOString()
+        : null,
     createdAt: endpoint.createdAt.toISOString(),
     updatedAt: endpoint.updatedAt.toISOString(),
   };
@@ -106,6 +117,24 @@ export class EndpointsController {
     const endpoint = await this.endpoints.update(auth.projectId, id, input);
     if (!endpoint) throw new NotFoundException("Endpoint not found");
     return toResponse(endpoint);
+  }
+
+  /**
+   * Issues a new signing secret and returns it (the only time it is shown).
+   * The old one keeps signing alongside it for `overlapSeconds` (default 24
+   * hours), so receivers can accept either while they switch over.
+   */
+  @Post(":id/rotate-secret")
+  @HttpCode(200)
+  async rotateSecret(
+    @CurrentProject() auth: AuthenticatedProject,
+    @Param("id", uuid) id: string,
+    @Body() body: unknown,
+  ): Promise<CreatedEndpointResponse> {
+    const input = validate(parseRotateSecret, body);
+    const endpoint = await this.endpoints.rotateSecret(auth.projectId, id, input);
+    if (!endpoint) throw new NotFoundException("Endpoint not found");
+    return { ...toResponse(endpoint), secret: endpoint.secret };
   }
 
   @Delete(":id")

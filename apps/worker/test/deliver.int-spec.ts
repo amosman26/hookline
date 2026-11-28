@@ -30,7 +30,12 @@ describeWithDb("deliver", () => {
 
   /** A pending delivery of one `invoice.paid` event to one endpoint. */
   async function pendingDelivery(
-    endpoint: { url?: string; enabled?: boolean } = {},
+    endpoint: {
+      url?: string;
+      enabled?: boolean;
+      previousSecret?: string;
+      previousSecretExpiresAt?: Date;
+    } = {},
     attemptCount = 0,
     chainStart = 0,
   ) {
@@ -44,6 +49,8 @@ describeWithDb("deliver", () => {
         secret: SECRET,
         eventTypes: ["invoice.paid"],
         enabled: endpoint.enabled ?? true,
+        previousSecret: endpoint.previousSecret ?? null,
+        previousSecretExpiresAt: endpoint.previousSecretExpiresAt ?? null,
       })
       .returning();
     const [event] = await testDb.db
@@ -336,5 +343,48 @@ describeWithDb("deliver", () => {
     const { delivery: after, attempts } = await state(delivery.id);
     expect(after).toMatchObject({ status: "succeeded", attemptCount: 1 });
     expect(attempts).toHaveLength(1);
+  });
+  describe("during a secret rotation", () => {
+    const PREVIOUS = "whsec_previous-secret";
+
+    function receivedSignature() {
+      const [req] = receiver.received;
+      return {
+        id: req?.headers["hookline-id"] as string,
+        timestamp: req?.headers["hookline-timestamp"] as string,
+        signature: req?.headers["hookline-signature"] as string,
+        body: req?.body ?? "",
+      };
+    }
+
+    it("signs with the current and the previous secret while the overlap lasts", async () => {
+      const { delivery } = await pendingDelivery({
+        previousSecret: PREVIOUS,
+        previousSecretExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      });
+
+      await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({ outcome: "succeeded" });
+
+      const signed = receivedSignature();
+      expect(signed.signature.split(" ")).toHaveLength(2);
+      expect(signed.signature.startsWith("v1=")).toBe(true);
+      expect(verify({ ...signed, secret: SECRET })).toBe(true);
+      expect(verify({ ...signed, secret: PREVIOUS })).toBe(true);
+      expect(verify({ ...signed, secret: "whsec_other" })).toBe(false);
+    });
+
+    it("stops signing with the previous secret once the overlap has ended", async () => {
+      const { delivery } = await pendingDelivery({
+        previousSecret: PREVIOUS,
+        previousSecretExpiresAt: new Date(Date.now() - 1000),
+      });
+
+      await expect(deliver(testDb.db, delivery.id)).resolves.toEqual({ outcome: "succeeded" });
+
+      const signed = receivedSignature();
+      expect(signed.signature.split(" ")).toHaveLength(1);
+      expect(verify({ ...signed, secret: SECRET })).toBe(true);
+      expect(verify({ ...signed, secret: PREVIOUS })).toBe(false);
+    });
   });
 });

@@ -175,3 +175,41 @@ export function parseUpdateEndpoint(value: unknown): UpdateEndpointInput {
   }
   return update;
 }
+
+/** How long the old secret keeps signing after a rotation unless told otherwise: 24 hours. */
+export const DEFAULT_ROTATION_OVERLAP_SECONDS = 24 * 60 * 60;
+/** Longest overlap a rotation may ask for: 7 days. */
+export const MAX_ROTATION_OVERLAP_SECONDS = 7 * 24 * 60 * 60;
+
+export interface RotateSecretInput {
+  /** Seconds the previous secret keeps signing deliveries; 0 retires it at once. */
+  overlapSeconds: number;
+}
+
+/**
+ * Validates a POST /v1/endpoints/:id/rotate-secret body. The body is
+ * optional; `overlapSeconds` defaults to DEFAULT_ROTATION_OVERLAP_SECONDS.
+ */
+export function parseRotateSecret(value: unknown): RotateSecretInput {
+  if (value === undefined || value === null) {
+    return { overlapSeconds: DEFAULT_ROTATION_OVERLAP_SECONDS };
+  }
+  const body = asBody(value);
+  const problems: string[] = [];
+  for (const key of Object.keys(body)) {
+    if (key !== "overlapSeconds") problems.push(`${key} is not a known field`);
+  }
+  const overlap = body.overlapSeconds ?? DEFAULT_ROTATION_OVERLAP_SECONDS;
+  if (
+    typeof overlap !== "number" ||
+    !Number.isInteger(overlap) ||
+    overlap < 0 ||
+    overlap > MAX_ROTATION_OVERLAP_SECONDS
+  ) {
+    problems.push(
+      `overlapSeconds must be an integer from 0 to ${MAX_ROTATION_OVERLAP_SECONDS} (7 days)`,
+    );
+  }
+  if (problems.length > 0) throw new EndpointInputError(problems);
+  return { overlapSeconds: overlap as number };
+}

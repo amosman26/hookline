@@ -61,6 +61,14 @@ export const endpoints = pgTable(
     url: text("url").notNull(),
     description: text("description"),
     secret: text("secret").notNull(),
+    /**
+     * The secret in use before the latest rotation. Deliveries are signed with
+     * it as well as the current one until previous_secret_expires_at, so
+     * receivers can switch over without dropping requests. Null when there is
+     * no overlap.
+     */
+    previousSecret: text("previous_secret"),
+    previousSecretExpiresAt: timestamp("previous_secret_expires_at", { withTimezone: true }),
     eventTypes: text("event_types")
       .array()
       .notNull()

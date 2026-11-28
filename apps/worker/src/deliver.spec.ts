@@ -1,4 +1,5 @@
-import { statusAfter } from "./deliver";
+import type { Endpoint } from "@hookline/db";
+import { signingSecrets, statusAfter } from "./deliver";
 import { MAX_ATTEMPTS } from "./retry";
 
 describe("statusAfter", () => {
@@ -18,5 +19,19 @@ describe("statusAfter", () => {
 
   it("dead-letters a retryable failure on the last attempt", () => {
     expect(statusAfter("retry", MAX_ATTEMPTS)).toBe("dead");
+  });
+});
+
+describe("signingSecrets", () => {
+  const endpoint = (previousSecret: string | null) =>
+    ({ secret: "whsec_new", previousSecret }) as Endpoint;
+
+  it("puts the current secret first and adds the previous one during the overlap", () => {
+    expect(signingSecrets(endpoint("whsec_old"), true)).toEqual(["whsec_new", "whsec_old"]);
+  });
+
+  it("uses only the current secret once the overlap is over or when there is none", () => {
+    expect(signingSecrets(endpoint("whsec_old"), false)).toEqual(["whsec_new"]);
+    expect(signingSecrets(endpoint(null), true)).toEqual(["whsec_new"]);
   });
 });

@@ -5,6 +5,7 @@ import { DB, type Database } from "../database/database.module";
 import {
   generateEndpointSecret,
   type CreateEndpointInput,
+  type RotateSecretInput,
   type UpdateEndpointInput,
 } from "./endpoint-input";
 
@@ -50,6 +51,34 @@ export class EndpointsService {
     const [row] = await this.db
       .update(endpoints)
       .set({ ...input, updatedAt: sql`now()` })
+      .where(and(eq(endpoints.projectId, projectId), eq(endpoints.id, id)))
+      .returning();
+    return row ?? null;
+  }
+
+  /**
+   * Swaps in a new signing secret. With an overlap the old secret becomes the
+   * previous one and keeps signing deliveries until it expires; with none it
+   * is dropped at once. Rotating again during an overlap retires the oldest
+   * secret, so at most two are ever active. One UPDATE, so concurrent
+   * rotations can't interleave: the right-hand sides all see the old row.
+   */
+  async rotateSecret(
+    projectId: string,
+    id: string,
+    input: RotateSecretInput,
+  ): Promise<Endpoint | null> {
+    const keepPrevious = input.overlapSeconds > 0;
+    const [row] = await this.db
+      .update(endpoints)
+      .set({
+        secret: generateEndpointSecret(),
+        previousSecret: keepPrevious ? sql`${endpoints.secret}` : null,
+        previousSecretExpiresAt: keepPrevious
+          ? sql`now() + ${input.overlapSeconds} * interval '1 second'`
+          : null,
+        updatedAt: sql`now()`,
+      })
       .where(and(eq(endpoints.projectId, projectId), eq(endpoints.id, id)))
       .returning();
     return row ?? null;

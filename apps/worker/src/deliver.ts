@@ -8,7 +8,7 @@ import {
   type Event,
 } from "@hookline/db";
 import { sign } from "@hookline/signing";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
   backoffDelay,
   classifyAttempt,
@@ -72,17 +72,32 @@ export function webhookBody(event: Event): string {
 }
 
 /**
+ * The secrets a delivery is signed with: the current one, then the one it
+ * replaced while the rotation overlap lasts. `previousActive` says whether
+ * the overlap is still running; deliver() asks Postgres, so the API and the
+ * worker agree on one clock.
+ */
+export function signingSecrets(endpoint: Endpoint, previousActive: boolean): string[] {
+  return previousActive && endpoint.previousSecret !== null
+    ? [endpoint.secret, endpoint.previousSecret]
+    : [endpoint.secret];
+}
+
+/**
  * The signed request for one event and endpoint. Hookline-Id is the event id,
  * so it stays the same on every attempt and receivers can use it to drop
- * duplicates (delivery is at-least-once).
+ * duplicates (delivery is at-least-once). During a secret rotation pass both
+ * secrets (see signingSecrets): the header then carries one `v1=` signature
+ * for each, and receivers on either secret keep verifying.
  */
 export function webhookRequest(
   event: Event,
   endpoint: Endpoint,
   timestamp?: number,
+  secrets: readonly string[] = [endpoint.secret],
 ): WebhookRequest {
   const body = webhookBody(event);
-  const signed = sign({ id: event.id, body, secret: endpoint.secret, timestamp });
+  const signed = sign({ id: event.id, body, secret: secrets, timestamp });
   return {
     url: endpoint.url,
     headers: { "content-type": "application/json", "user-agent": USER_AGENT, ...signed },
@@ -108,7 +123,12 @@ export async function deliver(
   options: DeliverOptions = {},
 ): Promise<DeliveryResult> {
   const [row] = await db
-    .select({ delivery: deliveries, event: events, endpoint: endpoints })
+    .select({
+      delivery: deliveries,
+      event: events,
+      endpoint: endpoints,
+      previousSecretActive: sql<boolean>`coalesce(${endpoints.previousSecretExpiresAt} > now(), false)`,
+    })
     .from(deliveries)
     .innerJoin(events, eq(events.id, deliveries.eventId))
     .innerJoin(endpoints, eq(endpoints.id, deliveries.endpointId))
@@ -119,7 +139,14 @@ export async function deliver(
 
   const enabled = row.endpoint.enabled;
   const result: SendResult = enabled
-    ? await (options.send ?? defaultSend)(webhookRequest(row.event, row.endpoint, options.now?.()))
+    ? await (options.send ?? defaultSend)(
+        webhookRequest(
+          row.event,
+          row.endpoint,
+          options.now?.(),
+          signingSecrets(row.endpoint, row.previousSecretActive),
+        ),
+      )
     : {
         statusCode: null,
         durationMs: 0,

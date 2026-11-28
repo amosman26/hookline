@@ -58,7 +58,14 @@ so every API instance shares the budget. Responses carry `RateLimit-Limit`,
 through around a window boundary. If Redis is unreachable the limit is skipped rather
 than refusing events.
 
-Not yet: secret rotation from the API, the dashboard and OpenAPI docs.
+`POST /v1/endpoints/:id/rotate-secret` issues a new signing secret and returns it once.
+The old secret keeps signing alongside it for 24 hours by default (`overlapSeconds`, up
+to 7 days; `0` retires it at once), so every delivery in that window carries two `v1=`
+signatures and receivers can switch over without dropping a request. Rotating again
+during an overlap retires the oldest secret, so at most two are ever active. Endpoint
+responses show `previousSecretExpiresAt` while the overlap lasts.
+
+Not yet: the dashboard and OpenAPI docs.
 
 ## Architecture
 
@@ -155,17 +162,18 @@ endpoint; the worker delivers it a moment later.
 Every route except `/health` needs `Authorization: Bearer <api key>` and only sees the
 key's own project. Bodies are JSON; unknown fields are rejected with `400`.
 
-| Method   | Path                        | Purpose                                                            |
-| -------- | --------------------------- | ------------------------------------------------------------------ |
-| `GET`    | `/health`                   | Liveness check, no auth                                            |
-| `GET`    | `/v1/project`               | The project the key belongs to                                     |
-| `POST`   | `/v1/endpoints`             | Register an endpoint; returns its secret once                      |
-| `GET`    | `/v1/endpoints`             | List endpoints                                                     |
-| `GET`    | `/v1/endpoints/:id`         | Fetch one endpoint                                                 |
-| `PATCH`  | `/v1/endpoints/:id`         | Change `url`, `description`, `eventTypes` or `enabled`             |
-| `DELETE` | `/v1/endpoints/:id`         | Remove an endpoint and its deliveries                              |
-| `POST`   | `/v1/events`                | Accept `{ type, payload }` and fan it out (`202 Accepted`)         |
-| `POST`   | `/v1/deliveries/:id/replay` | Queue a `failed` or `dead` delivery again (`202`; `409` otherwise) |
+| Method   | Path                              | Purpose                                                            |
+| -------- | --------------------------------- | ------------------------------------------------------------------ |
+| `GET`    | `/health`                         | Liveness check, no auth                                            |
+| `GET`    | `/v1/project`                     | The project the key belongs to                                     |
+| `POST`   | `/v1/endpoints`                   | Register an endpoint; returns its secret once                      |
+| `GET`    | `/v1/endpoints`                   | List endpoints                                                     |
+| `GET`    | `/v1/endpoints/:id`               | Fetch one endpoint                                                 |
+| `PATCH`  | `/v1/endpoints/:id`               | Change `url`, `description`, `eventTypes` or `enabled`             |
+| `POST`   | `/v1/endpoints/:id/rotate-secret` | Issue a new secret; the old one signs too for `overlapSeconds`     |
+| `DELETE` | `/v1/endpoints/:id`               | Remove an endpoint and its deliveries                              |
+| `POST`   | `/v1/events`                      | Accept `{ type, payload }` and fan it out (`202 Accepted`)         |
+| `POST`   | `/v1/deliveries/:id/replay`       | Queue a `failed` or `dead` delivery again (`202`; `409` otherwise) |
 
 Endpoint URLs must be `http` or `https` without credentials. Event types are 1–100
 characters of letters, digits and `._:-`, starting with a letter or digit; an endpoint
@@ -189,7 +197,9 @@ Answer with any `2xx` to mark the delivery `succeeded`.
 
 The signature is the hex HMAC-SHA256 of `{Hookline-Id}.{Hookline-Timestamp}.{raw body}`,
 keyed with the full endpoint secret (including `whsec_`). During a secret rotation the
-header carries several space-separated `v1=` values; accept the request if any matches.
+header carries two space-separated `v1=` values, one per secret; accept the request if
+any matches. To rotate, call `rotate-secret`, deploy the new secret to your receiver
+within the overlap, and the old one simply stops being used when it expires.
 
 ```ts
 import { createHmac, timingSafeEqual } from "node:crypto";

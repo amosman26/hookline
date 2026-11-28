@@ -29,6 +29,13 @@
       "when": 1795630600413,
       "tag": "0003_delivery_chain_start",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795889704776,
+      "tag": "0004_endpoint_previous_secret",
+      "breakpoints": true
     }
   ]
 }

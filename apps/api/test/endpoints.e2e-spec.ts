@@ -156,4 +156,99 @@ describeWithDb("endpoints API", () => {
   it("requires an API key", async () => {
     await request(app.getHttpServer()).get("/v1/endpoints").expect(401);
   });
+  describe("secret rotation", () => {
+    const HOUR_MS = 60 * 60 * 1000;
+
+    async function stored(id: string) {
+      const [row] = await testDb.db.select().from(endpoints).where(eq(endpoints.id, id));
+      if (!row) throw new Error("endpoint not found");
+      return row;
+    }
+
+    it("issues a new secret and keeps the old one signing for 24 hours by default", async () => {
+      const created = await createEndpoint();
+      const before = Date.now();
+
+      const res = await api().post(`/v1/endpoints/${created.id}/rotate-secret`).expect(200);
+
+      expect(res.body.id).toBe(created.id);
+      expect(res.body.secret).toMatch(/^whsec_/);
+      expect(res.body.secret).not.toBe(created.secret);
+      const expiresAt = Date.parse(res.body.previousSecretExpiresAt);
+      expect(expiresAt).toBeGreaterThan(before + 24 * HOUR_MS - 60_000);
+      expect(expiresAt).toBeLessThan(Date.now() + 24 * HOUR_MS + 60_000);
+
+      const row = await stored(created.id);
+      expect(row.secret).toBe(res.body.secret);
+      expect(row.previousSecret).toBe(created.secret);
+
+      const fetched = await api().get(`/v1/endpoints/${created.id}`).expect(200);
+      expect(fetched.body.previousSecretExpiresAt).toBe(res.body.previousSecretExpiresAt);
+      expect(fetched.body).not.toHaveProperty("secret");
+    });
+
+    it("takes a custom overlap, and 0 retires the old secret at once", async () => {
+      const created = await createEndpoint();
+
+      const hour = await api()
+        .post(`/v1/endpoints/${created.id}/rotate-secret`)
+        .send({ overlapSeconds: 3600 })
+        .expect(200);
+      const expiresAt = Date.parse(hour.body.previousSecretExpiresAt);
+      expect(Math.abs(expiresAt - (Date.now() + HOUR_MS))).toBeLessThan(60_000);
+
+      const now = await api()
+        .post(`/v1/endpoints/${created.id}/rotate-secret`)
+        .send({ overlapSeconds: 0 })
+        .expect(200);
+      expect(now.body.previousSecretExpiresAt).toBeNull();
+      const row = await stored(created.id);
+      expect(row).toMatchObject({
+        secret: now.body.secret,
+        previousSecret: null,
+        previousSecretExpiresAt: null,
+      });
+    });
+
+    it("keeps at most two secrets: rotating again retires the oldest", async () => {
+      const created = await createEndpoint();
+      const first = await api().post(`/v1/endpoints/${created.id}/rotate-secret`).expect(200);
+      const second = await api().post(`/v1/endpoints/${created.id}/rotate-secret`).expect(200);
+
+      const row = await stored(created.id);
+      expect(row.secret).toBe(second.body.secret);
+      expect(row.previousSecret).toBe(first.body.secret);
+      expect([row.secret, row.previousSecret]).not.toContain(created.secret);
+    });
+
+    it("reports no previous secret once the overlap has ended", async () => {
+      const created = await createEndpoint();
+      await api().post(`/v1/endpoints/${created.id}/rotate-secret`).expect(200);
+      await testDb.db
+        .update(endpoints)
+        .set({ previousSecretExpiresAt: new Date(Date.now() - 1000) })
+        .where(eq(endpoints.id, created.id));
+
+      const fetched = await api().get(`/v1/endpoints/${created.id}`).expect(200);
+      expect(fetched.body.previousSecretExpiresAt).toBeNull();
+    });
+
+    it("validates the body and hides other projects' endpoints", async () => {
+      const created = await createEndpoint();
+
+      const bad = await api()
+        .post(`/v1/endpoints/${created.id}/rotate-secret`)
+        .send({ overlapSeconds: -5, secret: "whsec_mine" })
+        .expect(400);
+      expect(bad.body.message).toEqual([
+        "secret is not a known field",
+        "overlapSeconds must be an integer from 0 to 604800 (7 days)",
+      ]);
+
+      await api(otherKey).post(`/v1/endpoints/${created.id}/rotate-secret`).expect(404);
+      await api().post(`/v1/endpoints/${randomUUID()}/rotate-secret`).expect(404);
+      await api().post("/v1/endpoints/not-a-uuid/rotate-secret").expect(400);
+      expect((await stored(created.id)).secret).toBe(created.secret);
+    });
+  });
 });

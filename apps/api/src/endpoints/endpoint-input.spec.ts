@@ -1,7 +1,10 @@
 import {
+  DEFAULT_ROTATION_OVERLAP_SECONDS,
   EndpointInputError,
   generateEndpointSecret,
+  MAX_ROTATION_OVERLAP_SECONDS,
   parseCreateEndpoint,
+  parseRotateSecret,
   parseUpdateEndpoint,
 } from "./endpoint-input";
 
@@ -122,5 +125,32 @@ describe("parseUpdateEndpoint", () => {
       "url must use http or https",
       "eventTypes must be a non-empty array",
     ]);
+  });
+});
+
+describe("parseRotateSecret", () => {
+  it.each([undefined, null, {}])("defaults the overlap to 24 hours for %p", (body) => {
+    expect(parseRotateSecret(body)).toEqual({ overlapSeconds: DEFAULT_ROTATION_OVERLAP_SECONDS });
+    expect(DEFAULT_ROTATION_OVERLAP_SECONDS).toBe(86_400);
+  });
+
+  it.each([0, 1, 3600, MAX_ROTATION_OVERLAP_SECONDS])("accepts an overlap of %p", (seconds) => {
+    expect(parseRotateSecret({ overlapSeconds: seconds })).toEqual({ overlapSeconds: seconds });
+  });
+
+  it.each([-1, 1.5, "3600", MAX_ROTATION_OVERLAP_SECONDS + 1, Number.NaN])(
+    "rejects an overlap of %p",
+    (overlapSeconds) => {
+      expect(problemsOf(() => parseRotateSecret({ overlapSeconds }))).toEqual([
+        "overlapSeconds must be an integer from 0 to 604800 (7 days)",
+      ]);
+    },
+  );
+
+  it("rejects unknown fields and non-object bodies", () => {
+    expect(problemsOf(() => parseRotateSecret({ secret: "whsec_mine" }))).toEqual([
+      "secret is not a known field",
+    ]);
+    expect(problemsOf(() => parseRotateSecret([]))).toEqual(["body must be a JSON object"]);
   });
 });
